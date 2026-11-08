@@ -8,10 +8,12 @@ ZZMM keeps a mod library organized, installs archives safely, checks for updates
 >
 > ZZMM is an independent utility. It is not affiliated with or endorsed by HoYoverse, miHoYo, GameBanana, or the XXMI project. Use mods at your own risk.
 
+![ZZMM showing a GameBanana mod detail page with install controls](docs/screenshot.png)
+
 ## Highlights
 
 - **Library management** — scan the Mods folder, group by character, enable/disable with the ZZMI `DISABLED_` prefix, and spot hash conflicts between active mods.
-- **GameBanana browser** — search, filter by category or character, sort, and install a mod without opening a browser.
+- **GameBanana browser** — search, filter by category or character, sort, open the source page, and install a mod without leaving the app.
 - **Safe archive installs** — drop `.zip`, `.7z`, or `.rar` files anywhere in the window. Wrapper folders and multi-mod packs are detected automatically.
 - **Update checks** — compare installed file IDs against GameBanana; updates install beside the old version and disable it instead of deleting anything.
 - **3D previews** — render a mod's mesh and decoded DDS textures directly from its INI, with per-part visibility and wireframe controls.

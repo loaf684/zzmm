@@ -18,6 +18,9 @@ src-tauri/gen/schemas/
 # Local diagnostics
 diag-sweep*.txt
 
+# Exported AI chat transcripts
+freebuff-chat-*.md
+
 # OS noise
 .DS_Store
 Thumbs.db

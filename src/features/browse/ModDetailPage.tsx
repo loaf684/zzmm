@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
   CalendarDays,
   Download,
+  ExternalLink,
   Heart,
   Loader2,
   Package,
@@ -15,10 +16,11 @@ import { Button } from "@/components/ui/Button";
 import { Notice } from "@/components/ui/Notice";
 import { Panel } from "@/components/ui/Panel";
 import { cn } from "@/lib/cn";
-import { formatGameBananaDescription } from "@/lib/gamebananaText";
 import { formatBytes, formatCount, formatDate } from "@/lib/format";
 import { useBrowseStore } from "@/store/browse";
 import { useDownloadStore } from "@/store/download";
+import { useModsStore } from "@/store/mods";
+import { GameBananaDescription } from "./GameBananaDescription";
 
 export function ModDetailPage() {
   const { modId } = useParams<{ modId: string }>();
@@ -35,16 +37,12 @@ export function ModDetailPage() {
   const install = useDownloadStore((state) => state.install);
   const cancel = useDownloadStore((state) => state.cancel);
   const cancelling = useDownloadStore((state) => state.cancelling);
+  const openUrl = useModsStore((state) => state.openUrl);
 
   const navigate = useNavigate();
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
   const [activeImage, setActiveImage] = useState(0);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
-
-  const description = useMemo(
-    () => formatGameBananaDescription(detail?.description),
-    [detail?.description],
-  );
 
   useEffect(() => {
     setDismissedError(null);
@@ -124,6 +122,8 @@ export function ModDetailPage() {
 
   const images = detail.gallery;
   const hero = images[activeImage] ?? detail.thumbnailUrl;
+  const profileUrl =
+    detail.profileUrl?.trim() || `https://gamebanana.com/mods/${detail.id}`;
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-8 py-8">
@@ -132,12 +132,22 @@ export function ModDetailPage() {
           <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
           Back to browse
         </Button>
-        <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-zinc-600">
-          <span>GameBanana ID {detail.id}</span>
-          {detail.cached ? <span>· cached</span> : null}
-          {detail.obsolete ? (
-            <span className="text-hot-400">· marked obsolete</span>
-          ) : null}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void openUrl(profileUrl)}
+          >
+            <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            View on GameBanana
+          </Button>
+          <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-zinc-600">
+            <span>GameBanana ID {detail.id}</span>
+            {detail.cached ? <span>· cached</span> : null}
+            {detail.obsolete ? (
+              <span className="text-hot-400">· marked obsolete</span>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -189,11 +199,9 @@ export function ModDetailPage() {
             eyebrow="Description"
             title="About this mod"
           >
-            {description ? (
+            {detail.description?.trim() ? (
               <div className="max-h-[520px] overflow-y-auto pr-2">
-                <p className="whitespace-pre-wrap break-words text-[12.5px] leading-6 text-zinc-400">
-                  {description}
-                </p>
+                <GameBananaDescription raw={detail.description} />
               </div>
             ) : (
               <p className="text-xs text-zinc-600">
