@@ -1,6 +1,6 @@
-# ZZMM
+<div align="center">
 
-**A desktop mod manager for Zenless Zone Zero, built for the ZZMI / XXMI (3DMigoto) loader.**
+# ZZMM
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/loaf684/zzmm)](https://github.com/loaf684/zzmm/releases)
@@ -8,6 +8,18 @@
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust 1.93+](https://img.shields.io/badge/Rust-1.93%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![TypeScript 5.7](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+
+<br />
+
+<img src="src-tauri/icons/icon.png" alt="ZZMM icon" width="150" />
+
+# Zenless Zone Mod Manager
+
+A desktop mod manager for Zenless Zone Zero, built for the ZZMI / XXMI (3DMigoto) loader.
+
+[Download](https://github.com/loaf684/zzmm/releases) · [Documentation](docs/TECHNICAL.md) · [Report bug](https://github.com/loaf684/zzmm/issues) · [Request feature](https://github.com/loaf684/zzmm/issues)
+
+</div>
 
 ZZMM keeps a Zenless Zone Zero mod library organized: it scans your Mods folder, groups mods by character, installs `.zip` / `.7z` / `.rar` archives, checks GameBanana for updates, and previews meshes and textures in 3D. Local-first, with no account and no telemetry.
 
