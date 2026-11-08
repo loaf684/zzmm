@@ -27,7 +27,7 @@ log = "0.4"
 # - sevenz-rust2: pure Rust, LZMA/LZMA2/BCJ/DELTA built in.
 # - unrar: vendors the UnRAR C++ extractor and links it statically; no DLL and no
 #   system dependency, but it does compile C++ (MSVC toolchain) and carries the
-#   UnRAR license terms. See README for the trade-off.
+#   UnRAR license terms. See docs/TECHNICAL.md for the trade-off.
 zip = { version = "9", default-features = false, features = [
   "deflate-flate2-zlib-rs",
   "deflate64",
