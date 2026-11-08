@@ -1,0 +1,58 @@
+[package]
+name = "zzmm"
+version = "0.1.0"
+description = "ZZMM - a mod manager for Zenless Zone Zero (ZZMI / XXMI)"
+authors = ["ZZMM contributors"]
+edition = "2021"
+rust-version = "1.93"
+
+[lib]
+name = "zzmm_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+
+# Archive support.
+# - zip: only pure-Rust codecs (deflate/zlib-rs, deflate64, lzma, xz, ppmd).
+# - sevenz-rust2: pure Rust, LZMA/LZMA2/BCJ/DELTA built in.
+# - unrar: vendors the UnRAR C++ extractor and links it statically; no DLL and no
+#   system dependency, but it does compile C++ (MSVC toolchain) and carries the
+#   UnRAR license terms. See README for the trade-off.
+zip = { version = "9", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+  "deflate64",
+  "lzma",
+  "xz",
+  "ppmd",
+] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"] }
+unrar = "0.5"
+
+# GameBanana client. With default features reqwest uses `native-tls`, which on
+# Windows is SChannel: no OpenSSL, no vendored TLS library to build.
+reqwest = { version = "0.12", features = ["json", "gzip"] }
+# Request spacing, 429 backoff, and the small politeness delay between checks.
+tokio = { version = "1", features = ["time", "sync"] }
+
+# 3D preview: pure-Rust BCn/DDS decoding, PNG encoding for texture previews and
+# base64 for shipping binary vertex buffers over the JSON IPC bridge.
+texture2ddecoder = "0.1.2"
+png = "0.17"
+base64 = "0.22"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

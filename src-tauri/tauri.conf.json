@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ZZMM",
+  "version": "0.1.0",
+  "identifier": "app.zzmm.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ZZMM — Zenless Zone Mod Manager",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1080,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "theme": "Dark",
+        "backgroundColor": "#05060a",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: https://*.gamebanana.com; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; worker-src 'none'; media-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; img-src 'self' asset: http://asset.localhost data: https://*.gamebanana.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' http://localhost:1420; font-src 'self' data:; worker-src 'none'; media-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "publisher": "ZZMM",
+    "copyright": "Copyright © 2026 ZZMM contributors",
+    "category": "Utility",
+    "shortDescription": "Mod manager for Zenless Zone Zero (ZZMI / XXMI)",
+    "longDescription": "ZZMM installs, enables, and previews Zenless Zone Zero mods for the ZZMI / XXMI (3DMigoto) loader. It browses GameBanana, installs archives, checks updates, and edits mod INI hotkeys with backups.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "compression": "lzma"
+      }
+    }
+  }
+}
