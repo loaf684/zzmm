@@ -23,11 +23,6 @@ A desktop mod manager for Zenless Zone Zero, built for the ZZMI / XXMI (3DMigoto
 
 ZZMM keeps a Zenless Zone Zero mod library organized: it scans your Mods folder, groups mods by character, installs `.zip` / `.7z` / `.rar` archives, checks GameBanana for updates, and previews meshes and textures in 3D. Local-first, with no account and no telemetry.
 
-> [!NOTE]
-> **Status:** v0.1.0, Windows 10/11 (x64). Builds are on the [Releases](https://github.com/loaf684/zzmm/releases) page.
->
-> ZZMM is an independent utility, not affiliated with or endorsed by HoYoverse, miHoYo, GameBanana, or the XXMI project. Use mods at your own risk.
-
 ## Screenshots
 
 ![ZZMM mod library grouped by character](docs/screenshot-library.png)
