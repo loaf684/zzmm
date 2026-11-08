@@ -57,7 +57,9 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "compression": "lzma"
+        "compression": "lzma",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   }

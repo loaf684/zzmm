@@ -8,7 +8,19 @@ ZZMM keeps a mod library organized, installs archives safely, checks for updates
 >
 > ZZMM is an independent utility. It is not affiliated with or endorsed by HoYoverse, miHoYo, GameBanana, or the XXMI project. Use mods at your own risk.
 
-![ZZMM showing a GameBanana mod detail page with install controls](docs/screenshot.png)
+## Screenshots
+
+Manage the mod library, grouped by character:
+
+![ZZMM mod library grouped by character](docs/screenshot-library.png)
+
+Browse GameBanana and install mods without leaving the app:
+
+![Browsing and installing GameBanana mods in ZZMM](docs/screenshot-browse.png)
+
+Open a mod for a 3D preview, hotkeys, and a link to its source page:
+
+![ZZMM mod detail page with a 3D preview and hotkey list](docs/screenshot-detail.png)
 
 ## Highlights
 
