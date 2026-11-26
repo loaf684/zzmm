@@ -224,3 +224,25 @@ data:
   green-channel convention varies between exports, and guessing it would produce
   visibly inverted relief. The map is not silently treated as a colour either;
   it is ignored and the diffuse is used.
+- **Outline.** `PartOutline` draws a second, back-facing copy of every visible
+  part pushed out along the vertex normals: the game's inked silhouette without a
+  post-processing pass, and without touching the decoded mesh. It is on by
+  default, and the preview header's `Outline` pill turns it off.
+  - The push is applied in clip space, so the contour is a hairline measured in
+    CSS pixels rather than a world-space shell that would swamp a small prop and
+    vanish on a large one.
+  - The shell samples the part's diffuse with the same `alphaTest` the surface
+    uses, so a cutout mask (hair, lace) drops the shell's transparent texels too;
+    otherwise the outline would trace each card's quad instead of the hair.
+  - The shell is drawn with `depthFunc: LessDepth`, `depthWrite: false` and a
+    small polygon offset, so it never z-fights the surface it shares depth with
+    (visible through a mask hole or inside an open coat) and never occludes
+    another part's rim.
+  - Vertices whose normal points at the camera project to zero length; they are
+    left in place rather than normalised, which would poison the triangle with
+    NaN. These faces are already covered by the surface they back.
+- **Expanded stage.** The preview header's expand control promotes the preview
+  to the whole window (the part chips and `$variable` toggles stay below it);
+  the same control, `Escape`, or leaving the 3D tab docks it back. The stage is
+  the same `Canvas` in the same DOM node, so expanding only resizes the
+  renderer: the camera keeps its orbit, and the mesh is not rebuilt.

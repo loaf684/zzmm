@@ -13,6 +13,8 @@ import {
   Image as ImageIcon,
   Keyboard,
   Loader2,
+  Maximize2,
+  Minimize2,
   Pencil,
   RefreshCw,
   Tag,
@@ -100,9 +102,11 @@ export function ModDetailPanel({
   const reloadPreview = usePreviewStore((state) => state.reload);
   const hiddenParts = usePreviewStore((state) => state.hiddenParts);
   const wireframe = usePreviewStore((state) => state.wireframe);
+  const outline = usePreviewStore((state) => state.outline);
   const toggleValues = usePreviewStore((state) => state.toggleValues);
   const togglePart = usePreviewStore((state) => state.togglePart);
   const setWireframe = usePreviewStore((state) => state.setWireframe);
+  const setOutline = usePreviewStore((state) => state.setOutline);
   const setToggle = usePreviewStore((state) => state.setToggle);
   const resetToggles = usePreviewStore((state) => state.resetToggles);
 
@@ -118,6 +122,7 @@ export function ModDetailPanel({
   const [characterDraft, setCharacterDraft] = useState("");
   const [savingCharacter, setSavingCharacter] = useState(false);
   const [viewerMode, setViewerMode] = useState<ViewerMode>("image");
+  const [expanded, setExpanded] = useState(false);
   const [capturingHotkey, setCapturingHotkey] = useState<string | null>(null);
   const [captureNoModifiers, setCaptureNoModifiers] = useState(false);
   const [hotkeyDrafts, setHotkeyDrafts] = useState<
@@ -182,12 +187,17 @@ export function ModDetailPanel({
         setRenameOpen(false);
         return;
       }
+      // Escape restores the docked preview before it closes the whole panel.
+      if (expanded) {
+        setExpanded(false);
+        return;
+      }
       onClose();
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, renameOpen]);
+  }, [onClose, renameOpen, expanded]);
 
   const images = useMemo(() => {
     const local = (details?.previews ?? []).map((path) => convertFileSrc(path));
@@ -220,6 +230,15 @@ export function ModDetailPanel({
   // how many keeps a grey model from reading as a broken render.
   const partsWithoutDiffuse =
     previewForMod?.parts.filter((part) => !part.texture).length ?? 0;
+
+  // The expanded stage belongs to the 3D viewer only; switching to the image
+  // carousel or losing the mesh docks it back into the panel.
+  const stageExpanded =
+    expanded && viewerMode === "3d" && previewForMod !== null;
+
+  useEffect(() => {
+    if (!stageExpanded && expanded) setExpanded(false);
+  }, [stageExpanded, expanded]);
 
   const hotkeyGroups = useMemo(() => {
     const groups = new Map<string, ModHotkey[]>();
@@ -400,8 +419,24 @@ export function ModDetailPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <section aria-label="Preview" className="relative">
-            <div className="relative aspect-[16/10] w-full overflow-hidden border-b border-ink-800/80 bg-gradient-to-b from-ink-850 to-ink-950">
+          <section
+            aria-label="Preview"
+            className={
+              // `fixed` and `relative` are both position utilities; Tailwind
+              // emits `.fixed` first, so they must never be applied together.
+              stageExpanded
+                ? "fixed inset-0 z-[75] flex flex-col bg-ink-950"
+                : "relative"
+            }
+          >
+            <div
+              className={cn(
+                "relative w-full overflow-hidden bg-gradient-to-b from-ink-850 to-ink-950",
+                stageExpanded
+                  ? "min-h-0 flex-1 border-0"
+                  : "aspect-[16/10] border-b border-ink-800/80",
+              )}
+            >
               {viewerMode === "3d" ? (
                 <div className="absolute inset-0">
                   {previewForMod && previewForMod.parts.length > 0 ? (
@@ -409,6 +444,7 @@ export function ModDetailPanel({
                       parts={previewForMod.parts}
                       hiddenParts={hiddenParts}
                       wireframe={wireframe}
+                      outline={outline}
                       className="h-full w-full border-0"
                     />
                   ) : previewBusy ? (
@@ -472,6 +508,15 @@ export function ModDetailPanel({
                 </div>
               )}
 
+              {stageExpanded ? (
+                <div
+                  className="pointer-events-none absolute left-1/2 top-3 z-10 max-w-[45%] -translate-x-1/2 truncate rounded-full border border-white/10 bg-ink-950/75 px-3 py-1 text-[10px] font-medium text-zinc-300 backdrop-blur"
+                  title={mod.displayName}
+                >
+                  {mod.displayName}
+                </div>
+              ) : null}
+
               <div className="absolute left-3 top-3 z-10 inline-flex rounded-full border border-white/10 bg-ink-950/75 p-0.5 backdrop-blur">
                 <ViewerTab
                   active={viewerMode === "image"}
@@ -513,24 +558,41 @@ export function ModDetailPanel({
                       {partsWithoutDiffuse} no diffuse
                     </span>
                   ) : null}
-                  <button
-                    type="button"
+                  <StageToggle
+                    active={outline}
+                    label="Outline"
+                    title={
+                      outline
+                        ? "Hide the ink outline"
+                        : "Show the ink outline"
+                    }
+                    onClick={() => setOutline(!outline)}
+                  />
+                  <StageToggle
+                    active={wireframe}
+                    label="Wire"
+                    title="Show part wireframes"
                     onClick={() => setWireframe(!wireframe)}
-                    aria-pressed={wireframe}
-                    className={cn(
-                      "rounded-full px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] transition-colors",
-                      wireframe
-                        ? "bg-acid-400/15 text-acid-300"
-                        : "text-zinc-500 hover:text-zinc-200",
-                    )}
-                  >
-                    Wire
-                  </button>
+                  />
                   <IconButton
                     label="Rebuild 3D preview"
                     onClick={() => void reloadPreview()}
                   >
                     <RefreshCw className="h-3 w-3" aria-hidden />
+                  </IconButton>
+                  <IconButton
+                    label={
+                      stageExpanded
+                        ? "Restore the preview into the panel"
+                        : "Expand the 3D preview to the whole window"
+                    }
+                    onClick={() => setExpanded((current) => !current)}
+                  >
+                    {stageExpanded ? (
+                      <Minimize2 className="h-3 w-3" aria-hidden />
+                    ) : (
+                      <Maximize2 className="h-3 w-3" aria-hidden />
+                    )}
                   </IconButton>
                 </div>
               ) : null}
@@ -1288,6 +1350,35 @@ function ViewerTab({
       )}
     >
       {children}
+    </button>
+  );
+}
+
+function StageToggle({
+  active,
+  label,
+  title,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title={title}
+      className={cn(
+        "rounded-full px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] transition-colors",
+        active
+          ? "bg-acid-400/15 text-acid-300"
+          : "text-zinc-500 hover:text-zinc-200",
+      )}
+    >
+      {label}
     </button>
   );
 }

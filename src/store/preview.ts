@@ -13,6 +13,11 @@ interface PreviewStore {
   hiddenParts: string[];
   wireframe: boolean;
   /**
+   * Inverted-hull outline. On by default so the preview reads like the game's
+   * inked characters; the preview header carries the switch.
+   */
+  outline: boolean;
+  /**
    * Explicit `$variable` choices from the preview controls. Sent with every
    * build so a rebuild keeps the variant the user picked.
    */
@@ -25,6 +30,7 @@ interface PreviewStore {
   togglePart: (name: string) => void;
   setAllPartsVisible: (visible: boolean) => void;
   setWireframe: (wireframe: boolean) => void;
+  setOutline: (outline: boolean) => void;
 }
 
 export const usePreviewStore = create<PreviewStore>((set, get) => {
@@ -80,6 +86,7 @@ export const usePreviewStore = create<PreviewStore>((set, get) => {
 
     hiddenParts: [],
     wireframe: false,
+    outline: true,
     toggleValues: {},
 
     load: async (folderName) => {
@@ -120,5 +127,7 @@ export const usePreviewStore = create<PreviewStore>((set, get) => {
       })),
 
     setWireframe: (wireframe) => set({ wireframe }),
+
+    setOutline: (outline) => set({ outline }),
   };
 });

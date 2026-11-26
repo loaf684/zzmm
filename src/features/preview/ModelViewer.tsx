@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 
@@ -99,13 +99,141 @@ function sanitizeIndices(indices: Uint32Array, vertexCount: number): Uint32Array
   return Uint32Array.from(kept);
 }
 
+/**
+ * Ink contour. A back-face shell pushed out along the vertex normals: the model
+ * gains the game's thin outline without a second post-processing pass, and the
+ * mesh itself is untouched.
+ *
+ * The push happens in clip space, so `thickness` is a hairline of CSS pixels
+ * rather than a world-space shell that would swamp a small prop and vanish on a
+ * large one.
+ */
+const OUTLINE_COLOR = "#2a3346";
+const OUTLINE_OPACITY = 0.85;
+const OUTLINE_THICKNESS = 1.6;
+/** Matches the surface's `alphaTest` for cutout parts (hair, lace). */
+const OUTLINE_ALPHA_TEST = 0.5;
+
+const OUTLINE_VERTEX_SHADER = /* glsl */ `
+  uniform float thickness;
+  uniform vec2 resolution;
+  varying vec2 vUv;
+
+  void main() {
+    vUv = uv;
+
+    vec4 clipPosition = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 clipNormal = projectionMatrix * modelViewMatrix * vec4(normal, 0.0);
+    vec2 direction = clipNormal.xy;
+
+    // A vertex whose normal points at the camera projects to zero length;
+    // normalising that would poison the whole triangle with NaN. Such a face is
+    // already covered by the surface it backs, so leaving it in place is free.
+    if (dot(direction, direction) > 1e-8) {
+      // offset_ndc = direction * thickness / resolution * 2, so after the
+      // viewport divide the contour is one hairline wide whatever the canvas
+      // size or the camera distance.
+      clipPosition.xy += normalize(direction) * thickness / resolution * clipPosition.w * 2.0;
+    }
+
+    gl_Position = clipPosition;
+  }
+`;
+
+const OUTLINE_FRAGMENT_SHADER = /* glsl */ `
+  uniform vec3 color;
+  uniform float opacity;
+  uniform sampler2D map;
+  uniform float hasMap;
+  uniform float alphaTest;
+  varying vec2 vUv;
+
+  void main() {
+    // Cutout parts must drop the shell's transparent texels too, otherwise the
+    // outline would trace every hair card's quad instead of the hair.
+    if (hasMap > 0.5 && texture2D(map, vUv).a < alphaTest) discard;
+
+    gl_FragColor = vec4(color, opacity);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+
+interface PartOutlineProps {
+  geometry: THREE.BufferGeometry;
+  visible: boolean;
+  /** The part's diffuse, so cutout cards keep their mask. */
+  map: THREE.Texture | null;
+  hasMap: boolean;
+  alphaTest: number;
+}
+
+function PartOutline({
+  geometry,
+  visible,
+  map,
+  hasMap,
+  alphaTest,
+}: PartOutlineProps) {
+  // The shader converts pixels to clipping offsets, so it needs the canvas size
+  // and has to follow every resize (docking and expanding the preview).
+  const size = useThree((state) => state.size);
+
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        // Only the shell's far side is drawn, which is what turns the offset
+        // copy into a rim instead of a silhouette around the whole model.
+        side: THREE.BackSide,
+        transparent: true,
+        // Coplanar shells (a flat card facing the camera) must not fight the
+        // surface for the same depth, and the rim of one part should never
+        // occlude the rim of the next.
+        depthFunc: THREE.LessDepth,
+        depthWrite: false,
+        // The shell shares the surface's depth; where a mask opens a hole (hair,
+        // lace) or the camera sees a part's inside, the two would otherwise
+        // z-fight into moire. Bias the shell behind by a fraction of a pixel so
+        // the surface always wins a tie.
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1,
+        uniforms: {
+          color: { value: new THREE.Color(OUTLINE_COLOR) },
+          opacity: { value: OUTLINE_OPACITY },
+          thickness: { value: OUTLINE_THICKNESS },
+          resolution: { value: new THREE.Vector2(1, 1) },
+          map: { value: null },
+          hasMap: { value: 0 },
+          alphaTest: { value: 0 },
+        },
+        vertexShader: OUTLINE_VERTEX_SHADER,
+        fragmentShader: OUTLINE_FRAGMENT_SHADER,
+      }),
+    [],
+  );
+
+  useEffect(() => () => material.dispose(), [material]);
+
+  useEffect(() => {
+    const uniforms = material.uniforms;
+    (uniforms.resolution.value as THREE.Vector2).set(size.width, size.height);
+    uniforms.map.value = hasMap ? map : null;
+    uniforms.hasMap.value = hasMap ? 1 : 0;
+    uniforms.alphaTest.value = hasMap ? alphaTest : 0;
+  }, [material, size.width, size.height, map, hasMap, alphaTest]);
+
+  return <mesh geometry={geometry} material={material} visible={visible} />;
+}
+
 interface PartMeshProps {
   part: MeshPart;
   visible: boolean;
   wireframe: boolean;
+  outline: boolean;
 }
 
-function PartMesh({ part, visible, wireframe }: PartMeshProps) {
+function PartMesh({ part, visible, wireframe, outline }: PartMeshProps) {
   // Rust leaves `uvs` empty when no texcoord buffer matched the mesh; mapping
   // the texture anyway would paint the whole part with a single texel.
   const hasUvs = part.uvs.length > 0;
@@ -179,6 +307,15 @@ function PartMesh({ part, visible, wireframe }: PartMeshProps) {
         // ZZZ meshes are not consistently wound, so render both faces.
         side={THREE.DoubleSide}
       />
+      {outline ? (
+        <PartOutline
+          geometry={geometry}
+          visible={visible}
+          map={hasUvs ? texture : null}
+          hasMap={hasUvs && texture !== null}
+          alphaTest={OUTLINE_ALPHA_TEST}
+        />
+      ) : null}
     </mesh>
   );
 }
@@ -187,6 +324,7 @@ interface ModelViewerProps {
   parts: MeshPart[];
   hiddenParts: string[];
   wireframe: boolean;
+  outline: boolean;
   className?: string;
 }
 
@@ -194,6 +332,7 @@ export function ModelViewer({
   parts,
   hiddenParts,
   wireframe,
+  outline,
   className,
 }: ModelViewerProps) {
   // Frame the camera and pick the up axis from the parts that carry the model,
@@ -277,6 +416,7 @@ export function ModelViewer({
               part={part}
               visible={!hiddenParts.includes(part.name)}
               wireframe={wireframe}
+              outline={outline}
             />
           ))}
         </group>

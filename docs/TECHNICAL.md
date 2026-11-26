@@ -335,8 +335,10 @@ archive.
   rehydrated into typed arrays, so a 50k-vertex mesh stays around 600 KB rather
   than megabytes of JSON numbers.
 - Viewer: embedded in the mod detail panel behind an **Image / 3D** tab, with
-  orbit / zoom / pan, ambient + hemisphere + key/fill lights, wireframe toggle,
-  per-component visibility and automatic camera framing from the mesh bounds.
+  orbit / zoom / pan, ambient + hemisphere + key/fill lights, an ink outline,
+  wireframe toggle, per-component visibility, an expand control that fills the
+  window with the stage (Escape or the restore button docks it back), and
+  automatic camera framing from the mesh bounds.
 - **Toggle controls**: the viewer lists the mod's `$variable` toggles that can
   change the rendered mesh and lets you switch them (e.g. show/hide a part)
   without editing the INI. A variable is offered only when a `[Key*]` section
