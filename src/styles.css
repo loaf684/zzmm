@@ -85,19 +85,51 @@
   .size-slider {
     -webkit-appearance: none;
     appearance: none;
-    height: 4px;
+    height: 6px;
     border-radius: 9999px;
     background: #2d2d2d;
     accent-color: #d2ff3c;
+    cursor: pointer;
+  }
+  /* Filled portion follows the thumb so the value reads at a glance. */
+  .size-slider::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 9999px;
+    background: linear-gradient(
+      to right,
+      #d2ff3c 0,
+      #d2ff3c var(--slider-fill, 50%),
+      #2d2d2d var(--slider-fill, 50%),
+      #2d2d2d 100%
+    );
   }
   .size-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    height: 12px;
-    width: 12px;
+    box-sizing: border-box;
+    margin-top: -5px;
+    height: 16px;
+    width: 16px;
     border-radius: 9999px;
     background: #d2ff3c;
-    border: 2px solid #0f0f0f;
-    cursor: pointer;
+    border: 3px solid #0f0f0f;
+    cursor: grab;
+    transition: box-shadow 120ms ease;
+  }
+  .size-slider:active::-webkit-slider-thumb {
+    cursor: grabbing;
+  }
+  .size-slider:hover::-webkit-slider-thumb {
+    box-shadow: 0 0 0 4px rgba(210, 255, 60, 0.15);
+  }
+  .size-slider:focus-visible {
+    outline: none;
+  }
+  .size-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 4px rgba(210, 255, 60, 0.3);
+  }
+  .size-slider:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
   }
 }
