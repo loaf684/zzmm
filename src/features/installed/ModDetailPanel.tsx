@@ -39,6 +39,7 @@ import { useHotkeysStore } from "@/store/hotkeys";
 import { useModsStore } from "@/store/mods";
 import { usePreviewStore } from "@/store/preview";
 import type { InstalledMod, ModHotkey } from "@/types/mods";
+import type { PreviewToggle } from "@/types/preview";
 import { describeHotkey } from "./hotkeyLabels";
 
 interface ModDetailPanelProps {
@@ -57,6 +58,51 @@ const HOTKEY_TYPES = ["activate", "hold", "toggle", "cycle"] as const;
 
 function hotkeyKey(hotkey: ModHotkey): string {
   return `${hotkey.file}::${hotkey.section}::${hotkey.line}`;
+}
+
+/**
+ * The option buttons for one preview toggle. Kept apart from the label so the
+ * compact strip and the many-toggle grid can lay them out differently.
+ */
+function ToggleOptions({
+  toggle,
+  selected,
+  busy,
+  onSelect,
+}: {
+  toggle: PreviewToggle;
+  selected: string;
+  busy: boolean;
+  onSelect: (value: string) => void;
+}) {
+  // A plain 0/1 pair reads better as Off/On than as two bare numbers.
+  const binary =
+    toggle.options.length === 2 &&
+    toggle.options[0] === "0" &&
+    toggle.options[1] === "1";
+
+  return (
+    <div className="inline-flex shrink-0 rounded-full border border-ink-700 bg-ink-950/40 p-0.5">
+      {toggle.options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          disabled={busy}
+          onClick={() => onSelect(option)}
+          aria-pressed={selected === option}
+          aria-label={`${toggle.label}: ${option}`}
+          className={cn(
+            "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40",
+            selected === option
+              ? "bg-acid-400/15 text-acid-300"
+              : "text-zinc-500 hover:text-zinc-200",
+          )}
+        >
+          {binary ? (option === "1" ? "On" : "Off") : option}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function ModDetailPanel({
@@ -230,6 +276,12 @@ export function ModDetailPanel({
   // how many keeps a grey model from reading as a broken render.
   const partsWithoutDiffuse =
     previewForMod?.parts.filter((part) => !part.texture).length ?? 0;
+  // A handful of controls reads well as one strip. Menu mods expose 12-25 of
+  // them, and a wrapping strip for those buries the panel: more than 8 get a
+  // bounded, scrollable two-column list instead.
+  const toggleCount = previewForMod?.toggles.length ?? 0;
+  const compactToggles = toggleCount <= 8;
+  const togglesOverridden = Object.keys(toggleValues).length > 0;
 
   // The expanded stage belongs to the 3D viewer only; switching to the image
   // carousel or losing the mesh docks it back into the panel. A preview with no
@@ -694,14 +746,9 @@ export function ModDetailPanel({
             {viewerMode === "3d" &&
             previewForMod &&
             previewForMod.toggles.length > 0 ? (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-ink-800/80 px-6 py-2.5">
-                {previewForMod.toggles.map((toggle) => {
-                  const selected = toggleValues[toggle.name] ?? toggle.value;
-                  const binary =
-                    toggle.options.length === 2 &&
-                    toggle.options[0] === "0" &&
-                    toggle.options[1] === "1";
-                  return (
+              compactToggles ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-ink-800/80 px-6 py-2.5">
+                  {previewForMod.toggles.map((toggle) => (
                     <div
                       key={toggle.name}
                       className="flex items-center gap-1.5"
@@ -710,39 +757,68 @@ export function ModDetailPanel({
                       <span className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">
                         {toggle.label}
                       </span>
-                      <div className="inline-flex rounded-full border border-ink-700 bg-ink-950/40 p-0.5">
-                        {toggle.options.map((option) => (
-                          <button
-                            key={option}
-                            type="button"
-                            onClick={() => void setToggle(toggle.name, option)}
-                            aria-pressed={selected === option}
-                            aria-label={`${toggle.label}: ${option}`}
-                            className={cn(
-                              "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
-                              selected === option
-                                ? "bg-acid-400/15 text-acid-300"
-                                : "text-zinc-500 hover:text-zinc-200",
-                            )}
-                          >
-                            {binary ? (option === "1" ? "On" : "Off") : option}
-                          </button>
-                        ))}
-                      </div>
+                      <ToggleOptions
+                        toggle={toggle}
+                        selected={toggleValues[toggle.name] ?? toggle.value}
+                        busy={previewBusy}
+                        onSelect={(value) => void setToggle(toggle.name, value)}
+                      />
                     </div>
-                  );
-                })}
-                {Object.keys(toggleValues).length > 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => void resetToggles()}
-                    className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
-                    title="Return to the in-game toggle state"
-                  >
-                    Reset
-                  </button>
-                ) : null}
-              </div>
+                  ))}
+                  {togglesOverridden ? (
+                    <button
+                      type="button"
+                      onClick={() => void resetToggles()}
+                      className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
+                      title="Return to the in-game toggle state"
+                    >
+                      Reset
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="border-b border-ink-800/80 px-6 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+                      In-game toggles
+                    </span>
+                    <span className="font-mono text-[10px] text-zinc-600">
+                      {toggleCount}
+                    </span>
+                    {togglesOverridden ? (
+                      <button
+                        type="button"
+                        onClick={() => void resetToggles()}
+                        className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
+                        title="Return to the in-game toggle state"
+                      >
+                        Reset
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="mt-2 grid max-h-44 grid-cols-1 gap-x-6 gap-y-1.5 overflow-y-auto pr-1 sm:grid-cols-2">
+                    {previewForMod.toggles.map((toggle) => (
+                      <div
+                        key={toggle.name}
+                        className="flex min-w-0 items-center justify-between gap-2"
+                        title={`$${toggle.name}`}
+                      >
+                        <span className="min-w-0 truncate text-[10px] uppercase tracking-[0.12em] text-zinc-500">
+                          {toggle.label}
+                        </span>
+                        <ToggleOptions
+                          toggle={toggle}
+                          selected={toggleValues[toggle.name] ?? toggle.value}
+                          busy={previewBusy}
+                          onSelect={(value) =>
+                            void setToggle(toggle.name, value)
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
             ) : null}
 
             {viewerMode === "3d" &&

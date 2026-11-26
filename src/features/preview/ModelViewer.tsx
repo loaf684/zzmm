@@ -363,7 +363,7 @@ function CameraRig({ frameKey, radius }: { frameKey: string; radius: number }) {
   useEffect(() => {
     // The group transform centres the model on the origin, so a camera on +Z
     // looks it in the face instead of from the side.
-    camera.position.set(0, radius * 0.12, radius * 2.4);
+    camera.position.set(0, radius * 0.12, radius * 3.0);
     camera.near = Math.max(radius / 1000, 0.001);
     camera.far = Math.max(radius * 60, 10);
     camera.updateProjectionMatrix();
@@ -436,7 +436,7 @@ export function ModelViewer({
         // as one silhouette.
         gl={{ antialias: true, alpha: true }}
         camera={{
-          position: [0, radius * 0.12, radius * 2.4],
+          position: [0, radius * 0.12, radius * 3.0],
           fov: 38,
           near: Math.max(radius / 1000, 0.001),
           far: Math.max(radius * 60, 10),
