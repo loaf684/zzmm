@@ -171,6 +171,12 @@ clothing from rendering as opaque cards without tinting the opaque parts.
   replaced with an unrelated atlas.
 - Duplicate/overlapping source meshes are rendered as the INI draws them; the
   preview does not guess which of two intentionally stacked meshes to hide.
+- A part whose position buffer is authored in a different frame than the rest of
+  the mod is drawn as authored. `BelleSummer_Toggles`' sunglasses buffer spans
+  Y 1.373-1.526 and Z -0.040-0.101 (Y-up) while its body buffer spans Z 0-1.412
+  (Z-up), so those glasses sit beside the model instead of on the face. The game
+  transforms that draw; the preview renders the bind pose and does not guess a
+  rotation for it.
 - Texture-only mods (e.g. `JiggleForgeShaderFix`) have no mesh and report that
   explicitly instead of building an empty scene.
 - No visual/browser verification is available in the build environment; checks
@@ -182,8 +188,10 @@ The React viewer (`ModelViewer.tsx`) is deliberately faithful to the source
 data:
 
 - A part with a diffuse texture uses **white** as the material base colour, so
-  the texture's own colours are shown unmodified. The neutral clay colour
-  (`#e8ebf0`) is only the fallback for parts that ship no colour map.
+  the texture's own colours are shown unmodified. A part that ships no colour
+  map is drawn in the darker neutral grey `#aeb5c0`, and the preview header
+  counts them (`n no diffuse`, with the reason on hover) so a grey model does
+  not read as a failed texture load.
 - Textures use **repeat** wrapping on both axes because game shaders sample with
   wrap addressing; hair, cloth, and scaled surfaces legitimately use UVs outside
   `0..1`. Clamping them would smear the last texel across those triangles.

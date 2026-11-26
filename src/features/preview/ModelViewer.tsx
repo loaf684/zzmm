@@ -42,6 +42,11 @@ function boundsOf(parts: MeshPart[]): Bounds {
       const x = positions[index];
       const y = positions[index + 1];
       const z = positions[index + 2];
+      // A corrupt buffer can carry NaN or infinities; one such vertex would
+      // otherwise blow up the bounds and leave the viewport empty.
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        continue;
+      }
       if (min.x > x) min.x = x;
       if (min.y > y) min.y = y;
       if (min.z > z) min.z = z;
@@ -64,6 +69,34 @@ function boundsOf(parts: MeshPart[]): Bounds {
   const radius = Math.max(size.length() * 0.5, 0.001);
 
   return { center, radius, size };
+}
+
+/**
+ * Drop triangles whose indices point past the vertex array. A mis-decoded index
+ * buffer would otherwise make WebGL draw garbage or throw on the whole part.
+ */
+function sanitizeIndices(indices: Uint32Array, vertexCount: number): Uint32Array {
+  let outOfRange = false;
+  for (const value of indices) {
+    if (value >= vertexCount) {
+      outOfRange = true;
+      break;
+    }
+  }
+
+  if (!outOfRange) return indices;
+
+  const kept: number[] = [];
+  for (let triangle = 0; triangle + 2 < indices.length; triangle += 3) {
+    const a = indices[triangle];
+    const b = indices[triangle + 1];
+    const c = indices[triangle + 2];
+    if (a < vertexCount && b < vertexCount && c < vertexCount) {
+      kept.push(a, b, c);
+    }
+  }
+
+  return Uint32Array.from(kept);
 }
 
 interface PartMeshProps {
@@ -98,7 +131,9 @@ function PartMesh({ part, visible, wireframe }: PartMeshProps) {
       }
     }
 
-    built.setIndex(new THREE.BufferAttribute(decodeUint32(part.indices), 1));
+    const vertexCount = Math.floor(positions.length / 3);
+    const indices = sanitizeIndices(decodeUint32(part.indices), vertexCount);
+    built.setIndex(new THREE.BufferAttribute(indices, 1));
     built.computeBoundingSphere();
 
     return built;
@@ -130,9 +165,10 @@ function PartMesh({ part, visible, wireframe }: PartMeshProps) {
       <meshStandardMaterial
         map={hasUvs ? texture ?? undefined : undefined}
         // With a diffuse texture the base colour stays white so the map's own
-        // colours are shown unmodified. The neutral clay colour is only the
-        // fallback for parts that ship no colour map at all.
-        color={hasUvs && texture ? "#ffffff" : "#e8ebf0"}
+        // colours are shown unmodified. A part with no colour map is drawn in a
+        // clearly darker neutral grey: bright clay used to read as a failed
+        // texture load, and the panel now names the count instead.
+        color={hasUvs && texture ? "#ffffff" : "#aeb5c0"}
         roughness={0.68}
         metalness={0.03}
         wireframe={wireframe}
@@ -160,7 +196,23 @@ export function ModelViewer({
   wireframe,
   className,
 }: ModelViewerProps) {
-  const { center, radius, size } = useMemo(() => boundsOf(parts), [parts]);
+  // Frame the camera and pick the up axis from the parts that carry the model,
+  // so a stray prop (an untextured cloak, a bone-parented accessory authored in
+  // another orientation) cannot shrink the character or tip it over.
+  const framing = useMemo(() => {
+    if (parts.length <= 1) return parts;
+
+    const largest = parts.reduce(
+      (max, part) => Math.max(max, part.triangleCount),
+      0,
+    );
+    const threshold = Math.max(largest * 0.02, 1);
+    const main = parts.filter((part) => part.triangleCount >= threshold);
+
+    return main.length > 0 ? main : parts;
+  }, [parts]);
+
+  const { center, radius, size } = useMemo(() => boundsOf(framing), [framing]);
 
   // YZZ/ZZZ position buffers are Z-up, but imported Genshin-style mods keep
   // the Y-up layout. Pick the axis that is clearly the height (with a margin,

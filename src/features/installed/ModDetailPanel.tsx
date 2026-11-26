@@ -215,6 +215,11 @@ export function ModDetailPanel({
   const previewBusy = previewLoading && previewFolder === mod.folderName;
   const previewFailure =
     previewError && previewFolder === mod.folderName ? previewError : null;
+  // Parts the mod ships no colour map for: the game's own textures are
+  // encrypted, so the viewer can only show them in the neutral material. Saying
+  // how many keeps a grey model from reading as a broken render.
+  const partsWithoutDiffuse =
+    previewForMod?.parts.filter((part) => !part.texture).length ?? 0;
 
   const hotkeyGroups = useMemo(() => {
     const groups = new Map<string, ModHotkey[]>();
@@ -496,6 +501,16 @@ export function ModDetailPanel({
                       }
                     >
                       {Object.keys(toggleValues).length > 0 ? "custom" : "in-game"}
+                    </span>
+                  ) : null}
+                  {partsWithoutDiffuse > 0 ? (
+                    <span
+                      className="rounded-full bg-amber-400/15 px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-amber-200"
+                      title={`${partsWithoutDiffuse} of ${previewForMod.parts.length} part${
+                        previewForMod.parts.length === 1 ? "" : "s"
+                      } ship no colour map in this mod. The game's own textures are not readable, so ${partsWithoutDiffuse === 1 ? "it is" : "they are"} drawn in the neutral material.`}
+                    >
+                      {partsWithoutDiffuse} no diffuse
                     </span>
                   ) : null}
                   <button
