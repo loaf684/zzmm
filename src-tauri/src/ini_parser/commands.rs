@@ -699,7 +699,13 @@ pub async fn scan_hotkey_conflicts(state: State<'_, AppState>) -> AppResult<Hotk
                         continue;
                     }
 
-                    let binding = parse_binding(&hotkey.binding);
+                    let condition = hotkey
+                        .settings
+                        .iter()
+                        .find(|setting| setting.key.eq_ignore_ascii_case("condition"))
+                        .map(|setting| setting.value.clone());
+
+                    let binding = parse_binding(&hotkey.binding).with_condition(condition.clone());
                     if binding.is_empty() {
                         continue;
                     }
@@ -714,6 +720,7 @@ pub async fn scan_hotkey_conflicts(state: State<'_, AppState>) -> AppResult<Hotk
                             line: hotkey.line,
                             binding: hotkey.binding,
                             action_type: hotkey.action_type,
+                            condition,
                         },
                         binding,
                     ));
@@ -867,5 +874,74 @@ mod tests {
         assert!(!parser::has_key_sections(
             "[TextureOverrideX]\nhash = abc\n"
         ));
+    }
+
+    #[test]
+    fn hotkey_conflicts_ignore_mutually_exclusive_conditions() {
+        let entry1 = HotkeyConflictEntry {
+            folder_name: "ModA".to_string(),
+            base_name: "ModA".to_string(),
+            display_name: "Mod A".to_string(),
+            file: "a.ini".to_string(),
+            section: "Key1".to_string(),
+            line: 1,
+            binding: "VK_F1".to_string(),
+            action_type: "activate".to_string(),
+            condition: Some("$character == 1".to_string()),
+        };
+        let binding1 = parse_binding("VK_F1").with_condition(Some("$character == 1".to_string()));
+
+        let entry2 = HotkeyConflictEntry {
+            folder_name: "ModB".to_string(),
+            base_name: "ModB".to_string(),
+            display_name: "Mod B".to_string(),
+            file: "b.ini".to_string(),
+            section: "Key1".to_string(),
+            line: 1,
+            binding: "VK_F1".to_string(),
+            action_type: "activate".to_string(),
+            condition: Some("$character == 2".to_string()),
+        };
+        let binding2 = parse_binding("VK_F1").with_condition(Some("$character == 2".to_string()));
+
+        let candidates = vec![(entry1, binding1), (entry2, binding2)];
+        let conflicts = build_conflicts(&candidates);
+        assert!(
+            conflicts.is_empty(),
+            "mutually exclusive conditions should not conflict"
+        );
+    }
+
+    #[test]
+    fn hotkey_conflicts_report_overlapping_conditions() {
+        let entry1 = HotkeyConflictEntry {
+            folder_name: "ModA".to_string(),
+            base_name: "ModA".to_string(),
+            display_name: "Mod A".to_string(),
+            file: "a.ini".to_string(),
+            section: "Key1".to_string(),
+            line: 1,
+            binding: "VK_F1".to_string(),
+            action_type: "activate".to_string(),
+            condition: Some("$character == 1".to_string()),
+        };
+        let binding1 = parse_binding("VK_F1").with_condition(Some("$character == 1".to_string()));
+
+        let entry2 = HotkeyConflictEntry {
+            folder_name: "ModB".to_string(),
+            base_name: "ModB".to_string(),
+            display_name: "Mod B".to_string(),
+            file: "b.ini".to_string(),
+            section: "Key1".to_string(),
+            line: 1,
+            binding: "VK_F1".to_string(),
+            action_type: "activate".to_string(),
+            condition: Some("$character == 1".to_string()),
+        };
+        let binding2 = parse_binding("VK_F1").with_condition(Some("$character == 1".to_string()));
+
+        let candidates = vec![(entry1, binding1), (entry2, binding2)];
+        let conflicts = build_conflicts(&candidates);
+        assert_eq!(conflicts.len(), 1, "overlapping conditions should conflict");
     }
 }
