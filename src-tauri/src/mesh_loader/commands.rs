@@ -246,8 +246,6 @@ fn build_preview(
     }
 
     let mut parts = Vec::new();
-    let mut hidden_parts = 0usize;
-    let mut orphan_parts = 0usize;
     let mut culled_tris = 0usize;
     // Only warn about a missing colour map when the mod actually ships one for
     // something else; a prop-only mod legitimately has no diffuse at all.
@@ -261,64 +259,8 @@ fn build_preview(
     // this mod's own files.
     let library = TextureLibrary::build(mods, &root);
 
-    // Variant copies (e.g. `AriaKFCTopPositionFlat` beside `AriaKFCTopPosition`)
-    // decode the same component; drawing both stacks identical geometry. Keep
-    // one position per component key, ranked by what the toggle state draws:
-    // the variant the game binds, then one from the mod's root INI, then any
-    // unbound copy. A variant the saved state excludes ranks last so a flat or
-    // alternate copy never wins over the real part.
-    let rank = |resource: &IniResource| {
-        let key = resource.section.to_ascii_lowercase();
-        let tier = if harvest.active.contains(&key) {
-            0
-        } else if harvest.excluded.contains(&key) {
-            3
-        } else if harvest.inactive.contains(&key) {
-            2
-        } else {
-            1
-        };
-        let in_root = resource.base_dir.as_deref() == Some(root.as_path());
-        (tier, !in_root)
-    };
-
-    let mut positions: Vec<IniResource> = Vec::new();
-    for position in position_buffers {
-        // A part whose buffers only sit inside an `if` branch that the toggle
-        // state (INI defaults plus the saved `d3dx_user.ini` values) turns off
-        // is a variant the game is not drawing: drop it before it can displace
-        // the active variant.
-        if harvest.hides(&position.section) {
-            hidden_parts += 1;
-            continue;
-        }
-
-        // A position that is only declared as a resource but never bound as
-        // `vb0` is a disabled/commented-out part (Pulchra Body2). Only prune
-        // when the mod has a binding table and another position exists, so a
-        // single alias-named buffer is never lost.
-        if declared_positions > 1
-            && harvest.has_position_bindings()
-            && !harvest.binds_position(&position.section)
-        {
-            orphan_parts += 1;
-            continue;
-        }
-
-        let key = position.part_key();
-        if key.is_empty() {
-            positions.push(position);
-            continue;
-        }
-        match positions.iter().position(|kept| kept.part_key() == key) {
-            Some(existing) => {
-                if rank(&position) < rank(&positions[existing]) {
-                    positions[existing] = position;
-                }
-            }
-            None => positions.push(position),
-        }
-    }
+    let (positions, hidden_parts, orphan_parts) =
+        select_positions(position_buffers, &root, &harvest, declared_positions);
 
     for position in positions.iter().take(MAX_PARTS) {
         let key = position.part_key();
@@ -672,7 +614,7 @@ fn build_preview(
         }));
     }
 
-    let toggles = supported_toggles(&parsed, &toggle_state, &harvest);
+    let toggles = supported_toggles(&root, &buffers, &parsed, &toggle_state, &harvest);
 
     Ok(MeshPreview {
         mod_folder: folder_name.to_string(),
@@ -684,6 +626,255 @@ fn build_preview(
         toggles_applied: hidden_parts > 0 || culled_tris > 0 || saved.from_user_config,
         toggles,
     })
+}
+
+/// The position buffers the preview renders, one per component key.
+///
+/// Variant copies (`AriaKFCTopPositionFlat` beside `AriaKFCTopPosition`) decode
+/// the same component; drawing both stacks identical geometry, so only the copy
+/// the toggle state draws is kept. A part the saved state hides, or one that is
+/// declared but never bound, is dropped. Returns the kept positions and how
+/// many were hidden or orphaned so `build_preview` can report both.
+fn select_positions(
+    position_buffers: Vec<IniResource>,
+    root: &Path,
+    harvest: &Harvest,
+    declared_positions: usize,
+) -> (Vec<IniResource>, usize, usize) {
+    let mut hidden_parts = 0usize;
+    let mut orphan_parts = 0usize;
+
+    // Rank by what the toggle state draws: the variant the game binds, then one
+    // from the mod's root INI, then any unbound copy. A variant the saved state
+    // excludes ranks last so a flat or alternate copy never wins over the real
+    // part.
+    let rank = |resource: &IniResource| {
+        let key = resource.section.to_ascii_lowercase();
+        let tier = if harvest.active.contains(&key) {
+            0
+        } else if harvest.excluded.contains(&key) {
+            3
+        } else if harvest.inactive.contains(&key) {
+            2
+        } else {
+            1
+        };
+        let in_root = resource.base_dir.as_deref() == Some(root);
+        (tier, !in_root)
+    };
+
+    let mut positions: Vec<IniResource> = Vec::new();
+    for position in position_buffers {
+        // A part whose buffers only sit inside an `if` branch that the toggle
+        // state (INI defaults plus the saved `d3dx_user.ini` values) turns off
+        // is a variant the game is not drawing: drop it before it can displace
+        // the active variant.
+        if harvest.hides(&position.section) {
+            hidden_parts += 1;
+            continue;
+        }
+
+        // A position that is only declared as a resource but never bound as
+        // `vb0` is a disabled/commented-out part (Pulchra Body2). Only prune
+        // when the mod has a binding table and another position exists, so a
+        // single alias-named buffer is never lost.
+        if declared_positions > 1
+            && harvest.has_position_bindings()
+            && !harvest.binds_position(&position.section)
+        {
+            orphan_parts += 1;
+            continue;
+        }
+
+        let key = position.part_key();
+        if key.is_empty() {
+            positions.push(position);
+            continue;
+        }
+        match positions.iter().position(|kept| kept.part_key() == key) {
+            Some(existing) => {
+                if rank(&position) < rank(&positions[existing]) {
+                    positions[existing] = position;
+                }
+            }
+            None => positions.push(position),
+        }
+    }
+
+    (positions, hidden_parts, orphan_parts)
+}
+
+/// What the preview would draw with one toggle state, reduced to the facts the
+/// exposure decision compares: for every emitted part its name, the colour map
+/// it is painted with, the position buffer it is built from (which fixes its
+/// vertex count) and its triangle count.
+///
+/// Everything is projected from the same plan structures `build_preview` uses
+/// to choose buffers, ranges and colour maps, so probing a candidate never
+/// decodes mesh or texture bytes. A draw range that only *moves* — same length,
+/// same colour map, as `shoes` does when it swaps `Legs_04` for `LegsHeels_04`
+/// — leaves every one of those facts alone and therefore earns no control, even
+/// though the raw harvest entry changed.
+fn parts_fingerprint(root: &Path, buffers: &[IniResource], harvest: &Harvest) -> Vec<String> {
+    let position_buffers: Vec<IniResource> = buffers
+        .iter()
+        .filter(|buffer| buffer.is_position())
+        .cloned()
+        .collect();
+    let declared_positions = position_buffers.len();
+    let (positions, _, _) = select_positions(position_buffers, root, harvest, declared_positions);
+
+    let mut out = Vec::new();
+    for position in positions.iter().take(MAX_PARTS) {
+        let key = position.part_key();
+        // Vertex count is a property of the chosen position buffer alone, so
+        // naming it (with its stride) pins the count without reading bytes.
+        let vertices = format!(
+            "{}:{}",
+            buffer_identity(position),
+            position.stride.unwrap_or_default()
+        );
+
+        let plans = select_index_plan(root, buffers, &key, &position.section, harvest);
+        if plans.is_empty() {
+            // No plan matched; `build_preview` falls back to the sibling index
+            // buffer, or to sequential triangles when there is none.
+            let index = find_sibling(buffers, &key, IniResource::is_index, harvest);
+            let material = index
+                .as_ref()
+                .and_then(|resource| harvest.texture_for_index(&resource.section))
+                .or_else(|| harvest.texture_for(&position.section));
+            out.push(format!(
+                "p:{vertices}|{}|{}|{}",
+                material_identity(material),
+                part_label(position),
+                index
+                    .as_ref()
+                    .map(buffer_identity)
+                    .unwrap_or_else(|| "sequential".to_string())
+            ));
+            continue;
+        }
+
+        let plan_count = plans.len();
+        for plan in plans {
+            let base_label = if plan_count > 1 {
+                part_label(&plan.resource)
+            } else {
+                part_label(position)
+            };
+            let section_material = harvest
+                .texture_for_index(&plan.resource.section)
+                .or_else(|| harvest.texture_for(&position.section));
+
+            let Some(ranges) = plan.ranges.as_deref() else {
+                // No explicit ranges: the whole index buffer is submitted, so
+                // its identity stands in for the triangle count.
+                out.push(format!(
+                    "p:{vertices}|{}|{base_label}|{}",
+                    material_identity(section_material),
+                    buffer_identity(&plan.resource)
+                ));
+                continue;
+            };
+
+            let total: u32 = ranges.iter().map(|range| range.count).sum();
+            if total == 0 {
+                // The section has explicit `drawindexed` lines but every one
+                // sits in a branch the toggle state does not take. The game
+                // submits no geometry, and `build_preview` emits no part.
+                continue;
+            }
+            if !ranges_fit(root, &plan.resource, ranges) {
+                // `build_preview` ignores ranges that overrun the index buffer
+                // and draws the whole buffer instead.
+                out.push(format!(
+                    "p:{vertices}|{}|{base_label}|{}",
+                    material_identity(section_material),
+                    buffer_identity(&plan.resource)
+                ));
+                continue;
+            }
+
+            // Group the ranges by the colour map bound at each draw and sum the
+            // triangles each group draws, the same grouping `build_preview`
+            // paints. The range *start* is deliberately absent: a
+            // length-preserving move draws the same number of triangles with
+            // the same material, so it does not change the emitted part.
+            let mut groups: Vec<(Option<String>, u32)> = Vec::new();
+            for range in ranges {
+                match groups
+                    .iter_mut()
+                    .find(|(texture, _)| texture == &range.texture)
+                {
+                    Some((_, count)) => *count += range.count,
+                    None => groups.push((range.texture.clone(), range.count)),
+                }
+            }
+            let multiple = groups.len() > 1;
+            for (texture, count) in groups {
+                let label = if multiple {
+                    let tag = match texture.as_deref() {
+                        Some(resource) => short_texture_tag(resource),
+                        None => "original".to_string(),
+                    };
+                    format!("{base_label} [{tag}]")
+                } else {
+                    base_label.clone()
+                };
+                out.push(format!(
+                    "p:{vertices}|{}|{label}|t{}",
+                    material_identity(texture.as_deref().or(section_material)),
+                    count / 3
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// The file a plan chose for a buffer, so swapping buffers stays visible even
+/// when both draw the same number of triangles.
+fn buffer_identity(resource: &IniResource) -> String {
+    resource
+        .filename
+        .clone()
+        .unwrap_or_else(|| resource.section.clone())
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+}
+
+/// A colour-map resource as the fingerprint sees it: lower-cased so two
+/// spellings of the same section compare equal, empty when the part is drawn
+/// with the game's original texture.
+fn material_identity(material: Option<&str>) -> String {
+    material
+        .map(|resource| resource.trim().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Whether every draw range stays inside the index buffer, read from the file
+/// size and the declared index width. A buffer that cannot be read fails open:
+/// the ranges are treated as drawn rather than losing the part.
+fn ranges_fit(root: &Path, resource: &IniResource, ranges: &[variants::DrawRange]) -> bool {
+    let width = match resource.format.as_deref() {
+        Some(format) if format.to_ascii_uppercase().contains("R32") => 4,
+        _ => 2,
+    };
+    let Some(bytes) = resolve_file(root, resource)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len() as usize)
+    else {
+        return true;
+    };
+    if bytes % width != 0 {
+        return true;
+    }
+    let total = bytes / width;
+    ranges
+        .iter()
+        .all(|range| (range.start as usize).saturating_add(range.count as usize) <= total)
 }
 
 /// Apply the viewer's toggle overrides.
@@ -778,19 +969,22 @@ fn probe_state(
 ///
 /// A candidate is a `$variable` used in an `if` / `elif` / `else if` condition
 /// with at least two known numeric values. It is exposed only when at least one
-/// alternative value produces a different harvest fingerprint than the state
-/// the model is rendered with, so a control appears exactly when it changes the
-/// mesh, its parts, the colour map resolved for a part/index buffer, or the draw
-/// ranges the game submits. Data maps (normal/light/glow/...) and null
-/// placeholders are not part of the fingerprint, so a toggle that only rebinds
-/// one of those earns no control. Variables that gate nothing on screen are
+/// alternative value changes the parts the preview would emit — a part's name,
+/// the colour map it is painted with, its vertex count or its triangle count —
+/// compared with the state the model is rendered with. The probe projects those
+/// facts from the same plan structures `build_preview` builds the parts from, so
+/// a control appears exactly when it changes an emitted part: re-binding a
+/// buffer no part consumes, or moving a draw without changing how many triangles
+/// it submits, earns no control. Variables that gate nothing on screen are
 /// never returned.
 fn supported_toggles(
+    root: &Path,
+    buffers: &[IniResource],
     parsed: &[ParsedIni],
     state: &ToggleState,
     harvest: &Harvest,
 ) -> Vec<PreviewToggle> {
-    let baseline = variants::harvest_signature(harvest);
+    let baseline = parts_fingerprint(root, buffers, harvest);
     let mut toggles = Vec::new();
 
     for (name, options) in toggle_candidates(parsed, state) {
@@ -808,7 +1002,8 @@ fn supported_toggles(
             .filter(|option| **option != current)
             .any(|option| {
                 let probe = probe_state(state, parsed, &name, option);
-                variants::harvest_signature(&harvest_all(parsed, &probe)) != baseline
+                let probed = harvest_all(parsed, &probe);
+                parts_fingerprint(root, buffers, &probed) != baseline
             });
         if !affects {
             continue;
@@ -1887,20 +2082,59 @@ mod texture_tests {
         state
     }
 
+    /// Buffers as `build_preview` collects them, so the exposure probe can run
+    /// on a fixture without writing buffer files to disk.
+    fn buffers_of(parsed: &[ParsedIni]) -> Vec<IniResource> {
+        let mut buffers = Vec::new();
+        for (_, path, lines) in parsed {
+            buffers.extend(resources::scan_lines(lines, Some(path.as_path())).buffers);
+        }
+        buffers
+    }
+
+    /// A root with no files: the probe compares plans, never buffer contents.
+    fn empty_root() -> PathBuf {
+        PathBuf::from(".")
+    }
+
+    /// `stride = 40` position bytes with `vertices` countable vertices.
+    fn vertex_buffer(vertices: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(vertices * 40);
+        for index in 0..vertices {
+            let base = index as f32 * 0.1;
+            for value in [base, 0.0, base] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0u8; 28]);
+        }
+        bytes
+    }
+
+    fn index_buffer(indices: &[u16]) -> Vec<u8> {
+        indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect()
+    }
+
     #[test]
     fn exposes_only_toggles_that_change_the_model() {
         let parsed = vec![parsed_ini(
             "[Constants]\r\n\
              global persist $hide_hat = 0\r\n\
              global persist $unused = 0\r\n\
+             [ResourceHatPosition]\r\n\
+             filename = HatPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceHatIB]\r\n\
+             filename = Hat.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
              [TextureOverrideHat]\r\n\
+             vb0 = ResourceHatPosition\r\n\
+             ib = ResourceHatIB\r\n\
              if $hide_hat == 0\r\n\
-             \tvb0 = ResourceHatPosition\r\n\
-             \tib = ResourceHatIB\r\n\
-             \tdrawindexed = 3, 0, 0\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
              else\r\n\
-             \tvb0 = ResourceHatHidden\r\n\
-             \tib = ResourceHatHiddenIB\r\n\
              \tdrawindexed = 3, 0, 0\r\n\
              endif\r\n\
              if $unused == 1\r\n\
@@ -1909,8 +2143,9 @@ mod texture_tests {
         )];
         let state = base_state(&parsed);
         let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
 
-        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
         assert_eq!(toggles.len(), 1, "{toggles:?}");
         let toggle = &toggles[0];
         assert_eq!(toggle.name, "hide_hat");
@@ -1982,19 +2217,28 @@ mod texture_tests {
              key = VK_3\r\n\
              type = cycle\r\n\
              $swapkey = 2, 10\r\n\
+             [ResourceBodyPosition]\r\n\
+             filename = BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
              [TextureOverrideBody]\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
              if $swapkey == 2\r\n\
-             \tvb0 = ResourceBody2\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
              else if $swapkey == 10\r\n\
-             \tvb0 = ResourceBody10\r\n\
+             \tdrawindexed = 9, 0, 0\r\n\
              else\r\n\
-             \tvb0 = ResourceBody0\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
              endif\r\n",
         )];
         let state = base_state(&parsed);
         let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
 
-        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
         assert_eq!(toggles.len(), 1, "{toggles:?}");
         let toggle = &toggles[0];
         assert_eq!(toggle.name, "swapkey");
@@ -2015,6 +2259,12 @@ mod texture_tests {
             "[Constants]\r\n\
              global persist $outfit = 0\r\n\
              global persist $outfit_on = 0\r\n\
+             [ResourceBodyPosition]\r\n\
+             filename = BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
              [Present]\r\n\
              if $outfit == 1\r\n\
              \t$outfit_on = 1\r\n\
@@ -2023,10 +2273,12 @@ mod texture_tests {
              endif\r\n\
              [TextureOverrideBody]\r\n\
              hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
              if $outfit_on == 1\r\n\
-             \tvb0 = ResourceOutfit1\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
              else\r\n\
-             \tvb0 = ResourceOutfit0\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
              endif\r\n",
         )];
         let mut state = base_state(&parsed);
@@ -2036,9 +2288,10 @@ mod texture_tests {
         }
         assert_eq!(state.value("outfit_on"), Some("0"));
         let harvest = harvest_all(&parsed, &state);
-        assert!(harvest.active.contains("resourceoutfit0"));
+        assert!(harvest.active.contains("resourcebodyposition"));
+        let buffers = buffers_of(&parsed);
 
-        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
         let outfit = toggles
             .iter()
             .find(|toggle| toggle.name == "outfit")
@@ -2053,17 +2306,26 @@ mod texture_tests {
         let parsed = vec![parsed_ini(
             "[Constants]\r\n\
              global persist $show_weapon = 0\r\n\
+             [ResourceWeaponPosition]\r\n\
+             filename = WeaponPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceWeaponIB]\r\n\
+             filename = Weapon.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
              [TextureOverrideWeapon]\r\n\
+             vb0 = ResourceWeaponPosition\r\n\
+             ib = ResourceWeaponIB\r\n\
              if $show_weapon == 0\r\n\
-             \tvb0 = ResourceWeaponHidden\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
              else\r\n\
-             \tvb0 = ResourceWeaponShown\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
              endif\r\n",
         )];
         let state = base_state(&parsed);
         let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
 
-        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
         assert_eq!(toggles.len(), 1);
         assert_eq!(toggles[0].options, vec!["0".to_string(), "1".to_string()]);
     }
@@ -2077,21 +2339,6 @@ mod texture_tests {
         let root = mods.join("ToggleWeaponMod");
         let _ = std::fs::remove_dir_all(&mods);
         std::fs::create_dir_all(&root).expect("temp mod dir");
-
-        let vertex_buffer = |vertices: usize| {
-            let mut bytes = Vec::with_capacity(vertices * 40);
-            for index in 0..vertices {
-                let base = index as f32 * 0.1;
-                for value in [base, 0.0, base] {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-                bytes.extend_from_slice(&[0u8; 28]);
-            }
-            bytes
-        };
-        let index_buffer = |indices: &[u16]| -> Vec<u8> {
-            indices.iter().flat_map(|index| index.to_le_bytes()).collect()
-        };
 
         std::fs::write(root.join("WeaponOffPosition.buf"), vertex_buffer(4)).expect("off vb");
         std::fs::write(root.join("WeaponOnPosition.buf"), vertex_buffer(8)).expect("on vb");
@@ -2157,6 +2404,206 @@ mod texture_tests {
         assert_eq!(toggled.toggles[0].value, "1");
 
         let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn drawindexed_gated_toggle_that_changes_a_part_is_exposed() {
+        // A `drawindexed` range the emitted part really consumes: the toggle
+        // changes how many triangles the part draws, so it must stay listed and
+        // flipping it must change the returned part.
+        let mods = std::env::temp_dir().join(format!("zzmm-toggle-range-{}", std::process::id()));
+        let root = mods.join("RangeMod");
+        let _ = std::fs::remove_dir_all(&mods);
+        std::fs::create_dir_all(&root).expect("temp mod dir");
+
+        std::fs::write(root.join("RangePosition.buf"), vertex_buffer(8)).expect("vb");
+        std::fs::write(root.join("Range.ib"), index_buffer(&[0, 1, 2, 1, 2, 3])).expect("ib");
+        std::fs::write(
+            root.join("range.ini"),
+            "[Constants]\r\n\
+             global persist $shoes = 0\r\n\
+             \r\n\
+             [ResourceRangePosition]\r\n\
+             filename = RangePosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceRangeIB]\r\n\
+             filename = Range.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideRange]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceRangePosition\r\n\
+             ib = ResourceRangeIB\r\n\
+             if $shoes == 0\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             endif\r\n",
+        )
+        .expect("ini");
+
+        let base = build_preview(&mods, "RangeMod", None).expect("base preview");
+        assert_eq!(base.parts.len(), 1, "{:?}", base.parts);
+        assert_eq!(base.parts[0].triangle_count, 2);
+        assert_eq!(base.toggles.len(), 1, "{:?}", base.toggles);
+        assert_eq!(base.toggles[0].name, "shoes");
+        assert_eq!(
+            base.toggles[0].options,
+            vec!["0".to_string(), "1".to_string()]
+        );
+
+        let toggled = build_preview(
+            &mods,
+            "RangeMod",
+            Some(vec![PreviewToggleValue {
+                name: "shoes".to_string(),
+                value: "1".to_string(),
+            }]),
+        )
+        .expect("override preview");
+        assert_eq!(toggled.parts.len(), 1);
+        assert_eq!(toggled.parts[0].triangle_count, 1);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn toggle_that_only_moves_a_draw_start_is_not_exposed() {
+        // The measured `shoes` / `skirt` shape: both branches submit a range of
+        // the same length and colour map, so the part keeps its name, material,
+        // vertex count and triangle count. The raw harvest entry changed, but
+        // the render did not, so no control may be offered.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $shoes = 0\r\n\
+             [ResourceBodyPosition]\r\n\
+             filename = BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             [TextureOverrideBody]\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             if $shoes == 0\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tdrawindexed = 6, 6, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
+
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
+        assert!(
+            !toggles.iter().any(|toggle| toggle.name == "shoes"),
+            "a length-preserving range move must not be listed: {toggles:?}"
+        );
+    }
+
+    #[test]
+    fn toggle_whose_ranges_no_emitted_part_consumes_is_not_exposed() {
+        // `$y` gates the ranges of an index buffer no emitted part is built
+        // from: the harvest's draw ranges change, but no part does.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $y = 0\r\n\
+             [ResourceAPosition]\r\n\
+             filename = APosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceAIB]\r\n\
+             filename = A.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             [ResourceBIB]\r\n\
+             filename = B.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             [TextureOverrideA]\r\n\
+             vb0 = ResourceAPosition\r\n\
+             ib = ResourceAIB\r\n\
+             drawindexed = 6, 0, 0\r\n\
+             [TextureOverrideB]\r\n\
+             ib = ResourceBIB\r\n\
+             if $y == 0\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
+
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
+        assert!(
+            toggles.is_empty(),
+            "ranges no emitted part consumes must not be listed: {toggles:?}"
+        );
+    }
+
+    #[test]
+    fn data_map_only_toggle_is_not_exposed() {
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $glow = 0\r\n\
+             [ResourceBodyPosition]\r\n\
+             filename = BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             [TextureOverrideBody]\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             ps-t0 = ResourceBodyDiffuse\r\n\
+             drawindexed = 6, 0, 0\r\n\
+             if $glow == 1\r\n\
+             \tps-t9 = ResourceBodyNormalMap\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
+
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
+        assert!(
+            toggles.is_empty(),
+            "a normal map is never a colour source: {toggles:?}"
+        );
+    }
+
+    #[test]
+    fn colour_map_swap_is_exposed() {
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $color = 0\r\n\
+             [ResourceBodyPosition]\r\n\
+             filename = BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             [TextureOverrideBody]\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             if $color == 0\r\n\
+             \tps-t0 = ResourceBodyDiffuseA\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tps-t0 = ResourceBodyDiffuseB\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+        let buffers = buffers_of(&parsed);
+
+        let toggles = supported_toggles(&empty_root(), &buffers, &parsed, &state, &harvest);
+        assert!(
+            toggles.iter().any(|toggle| toggle.name == "color"),
+            "a colour-map swap changes the part's material: {toggles:?}"
+        );
     }
 
     fn texture(section: &str, filename: &str) -> IniResource {
