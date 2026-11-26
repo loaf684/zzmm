@@ -158,6 +158,12 @@ pub fn conditions_can_overlap(a: Option<&str>, b: Option<&str>) -> bool {
         return true;
     };
 
+    if has_relational_string_cmp(&expr_a) || has_relational_string_cmp(&expr_b) {
+        // Relational string comparisons (<, <=, >, >=) have continuous ordering
+        // intervals that cannot be reliably partitioned by point samples; fail open.
+        return true;
+    }
+
     let mut vars = BTreeSet::new();
     let mut nums = BTreeMap::new();
     let mut strs = BTreeMap::new();
@@ -401,6 +407,25 @@ fn collect_domains(
                 }
                 _ => {}
             }
+        }
+    }
+}
+fn has_relational_string_cmp(expr: &Expr) -> bool {
+    match expr {
+        Expr::Not(inner) => has_relational_string_cmp(inner),
+        Expr::And(left, right) | Expr::Or(left, right) => {
+            has_relational_string_cmp(left) || has_relational_string_cmp(right)
+        }
+        Expr::Truthy(_) => false,
+        Expr::Compare(left, op, right) => {
+            let is_relational = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
+            if !is_relational {
+                return false;
+            }
+            matches!(
+                (&**left, &**right),
+                (Operand::Str(_), _) | (_, Operand::Str(_))
+            )
         }
     }
 }
@@ -865,6 +890,14 @@ mod tests {
         assert!(conditions_can_overlap(
             Some("invalid ?? expression"),
             Some("$active == 1")
+        ));
+    }
+
+    #[test]
+    fn fails_open_on_relational_string_comparisons() {
+        assert!(conditions_can_overlap(
+            Some("$name > 'a' && $name < 'z'"),
+            Some("$name > 'b' && $name < 'y'")
         ));
     }
 }
