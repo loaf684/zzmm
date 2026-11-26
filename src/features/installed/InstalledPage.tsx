@@ -50,8 +50,10 @@ type ToolTab = "conflicts" | "updates" | "loadouts";
 const VIEW_KEY = "zzmm.installed.view";
 const SIZE_KEY = "zzmm.installed.cardSize";
 const GROUP_KEY = "zzmm.installed.group";
-const MIN_CARD_SIZE = 190;
+const MIN_CARD_SIZE = 200;
 const MAX_CARD_SIZE = 360;
+/** The slider moves in these steps: five card sizes, no in-between values. */
+const CARD_SIZE_TICK = 40;
 
 function readViewMode(): ViewMode {
   try {
@@ -65,8 +67,8 @@ function readCardSize(): number {
   try {
     const value = Number(localStorage.getItem(SIZE_KEY));
     return Number.isFinite(value) && value >= MIN_CARD_SIZE && value <= MAX_CARD_SIZE
-      ? value
-      : 230;
+      ? snapCardSize(value)
+      : 240;
   } catch {
     return 230;
   }
@@ -78,6 +80,12 @@ function readGroupByCharacter(): boolean {
   } catch {
     return false;
   }
+}
+
+function snapCardSize(value: number): number {
+  const steps = Math.round((value - MIN_CARD_SIZE) / CARD_SIZE_TICK);
+  const snapped = MIN_CARD_SIZE + steps * CARD_SIZE_TICK;
+  return Math.min(MAX_CARD_SIZE, Math.max(MIN_CARD_SIZE, snapped));
 }
 
 function groupMods(mods: InstalledMod[]): CharacterGroup[] {
@@ -281,7 +289,6 @@ export function InstalledPage() {
   const [viewMode, setViewMode] = useState<ViewMode>(readViewMode);
   const [cardSize, setCardSize] = useState<number>(readCardSize);
   const pageRef = useRef<HTMLDivElement>(null);
-  const sizeReadoutRef = useRef<HTMLSpanElement>(null);
 
   // A drag used to push every pixel through React state, which re-rendered the
   // whole library for each step and felt sticky. The grid follows a CSS
@@ -291,9 +298,6 @@ export function InstalledPage() {
     const root = pageRef.current;
     if (!root) return;
     root.style.setProperty("--card-size", `${value}px`);
-    if (sizeReadoutRef.current) {
-      sizeReadoutRef.current.textContent = String(value);
-    }
     root.style.setProperty(
       "--slider-fill",
       `${((value - MIN_CARD_SIZE) / (MAX_CARD_SIZE - MIN_CARD_SIZE)) * 100}%`,
@@ -711,7 +715,7 @@ export function InstalledPage() {
                     type="range"
                     min={MIN_CARD_SIZE}
                     max={MAX_CARD_SIZE}
-                    step={10}
+                    step={CARD_SIZE_TICK}
                     defaultValue={cardSize}
                     onInput={(event) =>
                       previewCardSize(Number(event.currentTarget.value))
@@ -730,12 +734,6 @@ export function InstalledPage() {
                     aria-valuetext={`${cardSize} pixels`}
                     className="size-slider w-28 cursor-pointer"
                   />
-                  <span
-                    ref={sizeReadoutRef}
-                    className="w-7 shrink-0 text-right font-mono text-[10px] text-zinc-500"
-                  >
-                    {cardSize}
-                  </span>
                 </label>
 
                 <div className="flex items-center rounded-lg border border-ink-700 bg-ink-900 p-0.5">
