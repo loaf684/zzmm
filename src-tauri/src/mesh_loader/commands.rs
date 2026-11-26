@@ -2582,6 +2582,52 @@ drawindexed = 3, 0, 0
     }
 
     #[test]
+    fn s11_shaped_dump_keeps_every_partition_of_the_body() {
+        // S11Mod laid out small: one position buffer, three index buffers whose
+        // vertex ranges are disjoint and together cover the body (0..2, 3..5,
+        // 6..8 of nine vertices), the first draw asking for more indices than
+        // its buffer holds and the other two draws commented out. Every one of
+        // them is real geometry - QA measured S11's three IBs at 15,604 /
+        // 3,294 / 34 vertices, summing to the 18,932-vertex buffer - so the
+        // preview must draw all three, not treat the commented pair as absent.
+        let scratch = Scratch::new("Tri");
+        scratch.write_text(
+            "Tri.ini",
+            "[ResourceTriPosition]\nfilename = TriPosition.buf\nstride = 40\n\n\
+             [ResourceTriAIB]\nfilename = TriA.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceTriBIB]\nfilename = TriB.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceTriCIB]\nfilename = TriC.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverrideTri]\nhash = abc\nhandling = skip\n\n\
+             [TextureOverrideTriA]\nmatch_first_index = 0\nib = ResourceTriAIB\ndrawindexed = 9, 0, 0\n\n\
+             [TextureOverrideTriB]\nmatch_first_index = 3\nib = ResourceTriBIB\n; drawindexed = 3, 0, 0\n\n\
+             [TextureOverrideTriC]\nmatch_first_index = 6\nib = ResourceTriCIB\n; drawindexed = 3, 0, 0\n",
+        );
+        let vertices: Vec<[f32; 3]> = (0..9).map(|i| [i as f32, 0.0, 0.0]).collect();
+        scratch.write("TriPosition.buf", &position_buf(&vertices));
+        scratch.write("TriA.ib", &u16_indices(&[0, 1, 2]));
+        scratch.write("TriB.ib", &u16_indices(&[3, 4, 5]));
+        scratch.write("TriC.ib", &u16_indices(&[6, 7, 8]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 3, "{:?}", preview.parts);
+        let mut triangles: Vec<u32> = preview
+            .parts
+            .iter()
+            .map(|part| part.triangle_count)
+            .collect();
+        triangles.sort_unstable();
+        assert_eq!(triangles, vec![1, 1, 1], "{:?}", preview.parts);
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rendered the 3 that fit")),
+            "{:?}",
+            preview.warnings
+        );
+    }
+
+    #[test]
     fn ignores_manager_backups_that_would_duplicate_geometry() {
         let scratch = basic_mod();
         // Same INI under a backup name: stacking it would render the triangle

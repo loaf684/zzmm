@@ -570,11 +570,6 @@ pub fn harvest(lines: &[IniLine], state: &ToggleState) -> Harvest {
             let text = strip_comment(&lines[index].text);
             if !text.is_empty() {
                 settings.push(text.to_string());
-            } else if is_commented_out_draw(&lines[index].text) {
-                // `; drawindexed = 9123, 0, 0` is the author switching that
-                // draw off: the game submits nothing for the buffer, so the
-                // preview must not fall back to drawing the whole index buffer.
-                settings.push("drawindexed-disabled".to_string());
             }
         }
         sections.entry(lower).or_default().extend(settings);
@@ -732,12 +727,6 @@ fn walk(
                 }
                 if let Some(callee) = sections.get(&target) {
                     walk(callee, state, sections, true, visited, depth + 1, run, out);
-                }
-                continue;
-            }
-            "drawindexed-disabled" => {
-                if let Some(ib) = run.current_ib.clone() {
-                    run.drawn_ibs.insert(ib);
                 }
                 continue;
             }
@@ -1204,17 +1193,6 @@ struct Frame {
     any_taken: bool,
     /// The current branch runs.
     active: bool,
-}
-
-/// True when the whole line is a comment whose first word is `drawindexed`,
-/// i.e. a draw the mod disabled on purpose.
-fn is_commented_out_draw(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix(';') else {
-        return false;
-    };
-    let (word, _) = split_word(rest.trim_start());
-    let lower = word.to_ascii_lowercase();
-    lower == "drawindexed" || lower.starts_with("drawindexed=")
 }
 
 /// Remove a trailing `;` comment from a settings line.
@@ -2474,22 +2452,6 @@ mod tests {
         // Explicitly empty, not `None`: `None` means "no drawindexed at all,
         // draw the whole buffer", which would show the disabled variant.
         assert_eq!(harvest.draws_for("ResourceTopIB"), Some(&[][..]));
-    }
-
-    #[test]
-    fn a_commented_out_draw_marks_the_buffer_explicit() {
-        // S11's dump declares three IBs and switches two of the draws off with
-        // a comment. Those draws must read as explicitly empty, never as "no
-        // drawindexed at all", or the preview draws the whole buffer the game
-        // never submits.
-        let ini = lines(
-            "[TextureOverrideBody]\r\n\
-             ib = ResourceBodyIB\r\n\
-             ; drawindexed = 300, 0, 0\r\n",
-        );
-
-        let harvest = harvest(&ini, &state(&[]));
-        assert_eq!(harvest.draws_for("ResourceBodyIB"), Some(&[][..]));
     }
 
     #[test]
