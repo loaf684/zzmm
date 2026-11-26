@@ -341,14 +341,20 @@ archive.
   change the rendered mesh and lets you switch them (e.g. show/hide a part)
   without editing the INI. A variable is offered only when it is used in an
   `if` / `elif` / `else if` condition, has at least two known numeric values
-  (from `$var = n` assignments and `$var == n` comparisons; a lone `0`/`1` is
-  completed to the boolean pair), and at least one alternative value changes the
-  harvest fingerprint (active/excluded resources and the `drawindexed` ranges
-  with their colour maps). Variables that gate nothing on screen are never
-  shown. Overrides are applied before `[Present]` replay (so a selector
-  propagates to its derived guards) and again after it (so a direct override of
-  a derived guard wins); only names the mod gates on are accepted. Each change
-  rebuilds the preview, keeping the last mesh visible until the new one lands.
+  (from `$var = n` and comma-separated `$var = a, b` assignments plus
+  `$var == n`/`$var != n` comparisons; a lone `0`/`1` is completed to the
+  boolean pair), and at least one alternative changes the model fingerprint:
+  renderable resources bound on an active path, the colour map resolved for each
+  part and index buffer, and the `drawindexed` ranges with their colour maps.
+  Normal/light/glow/mask maps and null placeholders are excluded from the
+  fingerprint because the viewer never renders them, so a toggle that only
+  rebinds one earns no control. `currentValue` is always one of `options`, and
+  numeric options are ordered by value. Overrides are applied before `[Present]`
+  replay (so a selector propagates to its derived guards) and again after it (so
+  a direct override of a derived guard wins); only names the mod gates on and
+  numeric values are accepted. Each change rebuilds the preview, keeping the
+  last mesh visible until the new one lands and pruning hidden parts that the
+  new mesh no longer contains.
 - The mesh is built only when the 3D tab is opened. Loading and failure states
   are shown in place with a retry button; warnings (missing UVs, inferred
   strides, undecodable textures) are listed separately instead of failing the

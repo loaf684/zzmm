@@ -489,9 +489,13 @@ export function ModDetailPanel({
                   {previewForMod.togglesApplied ? (
                     <span
                       className="rounded-full bg-acid-400/15 px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-acid-300"
-                      title="Rendered with the in-game toggle state (d3dx_user.ini and INI defaults)"
+                      title={
+                        Object.keys(toggleValues).length > 0
+                          ? "Rendered with preview overrides on top of the in-game toggle state"
+                          : "Rendered with the in-game toggle state (d3dx_user.ini and INI defaults)"
+                      }
                     >
-                      in-game
+                      {Object.keys(toggleValues).length > 0 ? "custom" : "in-game"}
                     </span>
                   ) : null}
                   <button

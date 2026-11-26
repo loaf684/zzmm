@@ -52,7 +52,14 @@ export const usePreviewStore = create<PreviewStore>((set, get) => {
     try {
       const preview = await api.preview.load(folderName, toggleValues);
       if (ticket !== request || get().modFolder !== folderName) return;
-      set({ preview, isLoading: false });
+      // A toggle change can add or drop parts: prune hidden names that the new
+      // mesh no longer contains so a stale entry never hides a future part.
+      const visible = new Set(preview.parts.map((part) => part.name));
+      set((state) => ({
+        preview,
+        isLoading: false,
+        hiddenParts: state.hiddenParts.filter((name) => visible.has(name)),
+      }));
     } catch (error) {
       if (ticket !== request || get().modFolder !== folderName) return;
       // A rebuild keeps the last good mesh so its controls stay usable; the
