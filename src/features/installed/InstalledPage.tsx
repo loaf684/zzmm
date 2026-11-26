@@ -3,6 +3,8 @@ import {
   useEffect,
   useMemo,
   useState,
+  useRef,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -161,7 +163,6 @@ function handleCollectionKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
 function ModCollection({
   mods,
   layout,
-  cardSize,
   busyFolder,
   selectedBaseName,
   onSelect,
@@ -171,7 +172,6 @@ function ModCollection({
 }: {
   mods: InstalledMod[];
   layout: ViewMode;
-  cardSize: number;
   busyFolder: string | null;
   selectedBaseName: string | null;
   onSelect: (mod: InstalledMod) => void;
@@ -185,7 +185,10 @@ function ModCollection({
         className="grid gap-3"
         onKeyDown={handleCollectionKeyDown}
         style={{
-          gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`,
+          // Follows the slider's CSS variable so dragging does not re-render
+          // every card; the committed size is only a fallback.
+          gridTemplateColumns:
+            "repeat(auto-fill, minmax(var(--card-size, 230px), 1fr))",
         }}
       >
         {mods.map((mod) => (
@@ -277,6 +280,25 @@ export function InstalledPage() {
   const [conflictsOnly, setConflictsOnly] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(readViewMode);
   const [cardSize, setCardSize] = useState<number>(readCardSize);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const sizeReadoutRef = useRef<HTMLSpanElement>(null);
+
+  // A drag used to push every pixel through React state, which re-rendered the
+  // whole library for each step and felt sticky. The grid follows a CSS
+  // variable that is written straight to the DOM while dragging; the committed
+  // state (and localStorage) only updates when the drag ends.
+  const previewCardSize = useCallback((value: number) => {
+    const root = pageRef.current;
+    if (!root) return;
+    root.style.setProperty("--card-size", `${value}px`);
+    if (sizeReadoutRef.current) {
+      sizeReadoutRef.current.textContent = String(value);
+    }
+    root.style.setProperty(
+      "--slider-fill",
+      `${((value - MIN_CARD_SIZE) / (MAX_CARD_SIZE - MIN_CARD_SIZE)) * 100}%`,
+    );
+  }, []);
   const [groupByCharacter, setGroupByCharacter] = useState<boolean>(
     readGroupByCharacter,
   );
@@ -458,7 +480,18 @@ export function InstalledPage() {
   const conflictCount = currentResult?.conflicts.length ?? 0;
 
   return (
-    <div className="mx-auto w-full max-w-[1500px] px-8 py-8">
+    <div
+      ref={pageRef}
+      className="mx-auto w-full max-w-[1500px] px-8 py-8"
+      style={
+        {
+          "--card-size": `${cardSize}px`,
+          "--slider-fill": `${
+            ((cardSize - MIN_CARD_SIZE) / (MAX_CARD_SIZE - MIN_CARD_SIZE)) * 100
+          }%`,
+        } as CSSProperties
+      }
+    >
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
@@ -669,6 +702,7 @@ export function InstalledPage() {
                     "hidden items-center gap-2 md:flex",
                     viewMode === "list" && "opacity-40",
                   )}
+                  title="Card size"
                 >
                   <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-600">
                     Size
@@ -677,13 +711,31 @@ export function InstalledPage() {
                     type="range"
                     min={MIN_CARD_SIZE}
                     max={MAX_CARD_SIZE}
-                    step={20}
-                    value={cardSize}
-                    onChange={(event) => setCardSize(Number(event.target.value))}
+                    step={10}
+                    defaultValue={cardSize}
+                    onInput={(event) =>
+                      previewCardSize(Number(event.currentTarget.value))
+                    }
+                    onPointerUp={(event) =>
+                      setCardSize(Number(event.currentTarget.value))
+                    }
+                    onKeyUp={(event) =>
+                      setCardSize(Number(event.currentTarget.value))
+                    }
+                    onBlur={(event) =>
+                      setCardSize(Number(event.currentTarget.value))
+                    }
                     disabled={viewMode === "list"}
                     aria-label="Card size"
-                    className="size-slider w-24 cursor-pointer"
+                    aria-valuetext={`${cardSize} pixels`}
+                    className="size-slider w-28 cursor-pointer"
                   />
+                  <span
+                    ref={sizeReadoutRef}
+                    className="w-7 shrink-0 text-right font-mono text-[10px] text-zinc-500"
+                  >
+                    {cardSize}
+                  </span>
                 </label>
 
                 <div className="flex items-center rounded-lg border border-ink-700 bg-ink-900 p-0.5">
@@ -815,7 +867,6 @@ export function InstalledPage() {
                           <ModCollection
                             mods={group.mods}
                             layout={viewMode}
-                            cardSize={cardSize}
                             busyFolder={busyFolder}
                             selectedBaseName={selectedBaseName}
                             onSelect={(mod) =>
@@ -834,7 +885,6 @@ export function InstalledPage() {
                     <ModCollection
                       mods={flatMods}
                       layout={viewMode}
-                      cardSize={cardSize}
                       busyFolder={busyFolder}
                       selectedBaseName={selectedBaseName}
                       onSelect={(mod) => setSelectedBaseName(mod.baseName)}
