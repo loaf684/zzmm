@@ -159,7 +159,13 @@ fn build_preview(
     let mut harvest = Harvest::default();
 
     for (relative, path, lines) in &parsed {
-        let found = resources::scan_lines(lines, Some(path.as_path()));
+        // 3DMigoto resolves a resource `filename` relative to the folder that
+        // declares it, so the INI's *directory* is the base, never the INI file
+        // itself. Passing the file made every relative path miss its direct
+        // hit and fall through to the by-name search, which silently returned
+        // another variant's file (`.\GraceMod.03\GracebodyB.ib` resolving to
+        // `.\GraceMod.01\GracebodyB.ib`).
+        let found = resources::scan_lines(lines, path.parent());
 
         // Texture-only INIs are common (`0.ini`, `seed/face.ini`): they hold
         // the diffuse resources and `this =` overrides but no buffers. Only
@@ -1837,7 +1843,8 @@ fn collect_diffuse_files(dir: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Resolve a resource file relative to its INI, then by name anywhere in the mod.
+/// Resolve a resource file relative to the folder of the INI that declares it,
+/// then by name anywhere in the mod.
 fn resolve_file(root: &Path, resource: &IniResource) -> Option<PathBuf> {
     let name = resource.filename.as_deref()?.replace('\\', "/");
 
@@ -1848,8 +1855,31 @@ fn resolve_file(root: &Path, resource: &IniResource) -> Option<PathBuf> {
         }
     }
 
-    let basename = name.rsplit('/').next()?.to_ascii_lowercase();
-    find_by_name(root, &basename, 0)
+    let (declared_dir, basename) = match name.rsplit_once('/') {
+        Some((dir, basename)) => (Some(dir), basename),
+        None => (None, name.as_str()),
+    };
+
+    // A bare file name is a mod-relative reference (an INI in `Hair/` may name
+    // a file that lives at the mod root): search the whole mod. A name that
+    // carries a directory is a path, so only the folder it names, the same
+    // path from the mod root, and the mod root itself are valid. Falling back
+    // to a by-name search for it would silently swap in a sibling variant's
+    // buffer or atlas — `.\GraceMod.03\GracebodyB.ib` becoming `GraceMod.01`'s
+    // file — instead of reporting the file as absent.
+    if declared_dir.is_none() {
+        return find_by_name(root, &basename.to_ascii_lowercase(), 0);
+    }
+
+    if !declared_dir.is_some_and(|dir| dir.starts_with("..")) {
+        let from_root = root.join(&name);
+        if from_root.is_file() {
+            return Some(from_root);
+        }
+    }
+
+    let at_root = root.join(basename);
+    at_root.is_file().then_some(at_root)
 }
 
 fn dedupe_resources_by_path(root: &Path, resources: &mut Vec<IniResource>) {
@@ -1900,6 +1930,11 @@ fn find_by_name(dir: &Path, wanted: &str, depth: usize) -> Option<PathBuf> {
             subdirectories.push(entry.path());
         }
     }
+
+    // Iterate in a stable order: the fallback picks one file among same-named
+    // copies, and a read_dir order that varies between machines would make the
+    // same mod render differently.
+    subdirectories.sort();
 
     for directory in subdirectories {
         if let Some(found) = find_by_name(&directory, wanted, depth + 1) {
@@ -2796,5 +2831,214 @@ mod texture_tests {
         assert_eq!(library.find("yixuancoat", "yixuan", root), None);
         // Hair is never borrowed from a body sheet.
         assert_eq!(library.find("yanagihair", "yanagi", root), None);
+    }
+}
+
+/// Resource `filename` resolution. 3DMigoto resolves a declared file against
+/// the folder of the INI that declares it; a same-named file living in another
+/// variant's folder must never be substituted for it.
+#[cfg(test)]
+mod resource_path_tests {
+    use super::*;
+
+    fn vertex_buffer(vertices: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(vertices * 40);
+        for index in 0..vertices {
+            let base = index as f32 * 0.1;
+            for value in [base, 0.0, base] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0u8; 28]);
+        }
+        bytes
+    }
+
+    fn index_buffer(indices: &[u16]) -> Vec<u8> {
+        indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect()
+    }
+
+    fn temp_mods(name: &str) -> PathBuf {
+        let mods = std::env::temp_dir().join(format!("zzmm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        mods
+    }
+
+    #[test]
+    fn a_relative_path_resolves_inside_the_declaring_inis_folder() {
+        // Both variants ship the same file names; only the declared variant's
+        // files may be used. The previous resolution joined the path onto the
+        // INI *file* and then searched the mod by name, which returned
+        // `Variant.01`'s buffer for the active `Variant.02` draw.
+        let mods = temp_mods("variant-paths");
+        let root = mods.join("VariantMod");
+        for variant in ["Variant.01", "Variant.02"] {
+            std::fs::create_dir_all(root.join(variant)).expect("variant dir");
+        }
+        std::fs::write(root.join("Variant.01/BodyPosition.buf"), vertex_buffer(4)).expect("vb 1");
+        std::fs::write(root.join("Variant.02/BodyPosition.buf"), vertex_buffer(8)).expect("vb 2");
+        std::fs::write(root.join("Variant.01/Body.ib"), index_buffer(&[0, 1, 2, 1, 2, 3]))
+            .expect("ib 1");
+        std::fs::write(
+            root.join("Variant.02/Body.ib"),
+            index_buffer(&[0, 1, 2, 1, 2, 3, 4, 5, 6, 7, 4, 6]),
+        )
+        .expect("ib 2");
+        std::fs::write(
+            root.join("variant.ini"),
+            "[Constants]\r\n\
+             global persist $v = 1\r\n\
+             \r\n\
+             [ResourceBodyPosition.0]\r\n\
+             filename = .\\Variant.01\\BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyPosition.1]\r\n\
+             filename = .\\Variant.02\\BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyIB.0]\r\n\
+             filename = .\\Variant.01\\Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [ResourceBodyIB.1]\r\n\
+             filename = .\\Variant.02\\Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             if $v == 0\r\n\
+             \tvb0 = ResourceBodyPosition.0\r\n\
+             \tib = ResourceBodyIB.0\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceBodyPosition.1\r\n\
+             \tib = ResourceBodyIB.1\r\n\
+             \tdrawindexed = 12, 0, 0\r\n\
+             endif\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "VariantMod", None).expect("preview");
+        assert_eq!(preview.parts.len(), 1);
+        assert_eq!(preview.parts[0].vertex_count, 8, "active variant's position buffer");
+        assert_eq!(preview.parts[0].triangle_count, 4, "active variant's index buffer");
+
+        // The other variant still resolves to its own files.
+        let other = build_preview(
+            &mods,
+            "VariantMod",
+            Some(vec![PreviewToggleValue {
+                name: "v".to_string(),
+                value: "0".to_string(),
+            }]),
+        )
+        .expect("preview");
+        assert_eq!(other.parts[0].vertex_count, 4);
+        assert_eq!(other.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_missing_relative_path_is_reported_and_never_substituted() {
+        // `Variant.02` ships no `Body.ib`; `Variant.01`'s must not stand in for
+        // it. The head slice keeps the preview alive so the warning is
+        // observable on a successful build.
+        let mods = temp_mods("missing-path");
+        let root = mods.join("MissingMod");
+        std::fs::create_dir_all(root.join("Variant.01")).expect("variant 1");
+        std::fs::create_dir_all(root.join("Variant.02")).expect("variant 2");
+        std::fs::write(root.join("Variant.02/BodyPosition.buf"), vertex_buffer(9)).expect("vb");
+        std::fs::write(root.join("Variant.01/Body.ib"), index_buffer(&[0, 1, 2, 1, 2, 3]))
+            .expect("foreign ib");
+        std::fs::write(root.join("Variant.02/HeadPosition.buf"), vertex_buffer(3)).expect("head vb");
+        std::fs::write(root.join("Variant.02/Head.ib"), index_buffer(&[0, 1, 2])).expect("head ib");
+        std::fs::write(
+            root.join("missing.ini"),
+            "[ResourceBodyPosition]\r\n\
+             filename = .\\Variant.02\\BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyIB]\r\n\
+             filename = .\\Variant.02\\Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [ResourceHeadPosition]\r\n\
+             filename = .\\Variant.02\\HeadPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadIB]\r\n\
+             filename = .\\Variant.02\\Head.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             drawindexed = 6, 0, 0\r\n\
+             \r\n\
+             [TextureOverrideHead]\r\n\
+             hash = def\r\n\
+             vb0 = ResourceHeadPosition\r\n\
+             ib = ResourceHeadIB\r\n\
+             drawindexed = 3, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "MissingMod", None).expect("preview");
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Body.ib was not found on disk")),
+            "missing buffer must be reported: {:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "Head");
+        assert!(
+            preview.parts.iter().all(|part| part.triangle_count != 2),
+            "the sibling variant's index buffer must not be used"
+        );
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_bare_file_name_still_resolves_from_a_nested_ini() {
+        // An INI in a subfolder may name a file that lives beside the mod root;
+        // that documented fallback must survive the stricter path handling.
+        let mods = temp_mods("bare-name");
+        let root = mods.join("BareMod");
+        std::fs::create_dir_all(root.join("sub")).expect("sub dir");
+        std::fs::write(root.join("SharedPosition.buf"), vertex_buffer(4)).expect("vb");
+        std::fs::write(root.join("Shared.ib"), index_buffer(&[0, 1, 2, 1, 2, 3])).expect("ib");
+        std::fs::write(
+            root.join("sub/part.ini"),
+            "[ResourceSharedPosition]\r\n\
+             filename = SharedPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceSharedIB]\r\n\
+             filename = Shared.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideShared]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceSharedPosition\r\n\
+             ib = ResourceSharedIB\r\n\
+             drawindexed = 6, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "BareMod", None).expect("preview");
+        assert_eq!(preview.parts.len(), 1);
+        assert_eq!(preview.parts[0].vertex_count, 4);
+        assert_eq!(preview.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
     }
 }
