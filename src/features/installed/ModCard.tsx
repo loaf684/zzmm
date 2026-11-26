@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { FolderOpen, Keyboard, Loader2, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/Badge";
+import { CharacterAvatar } from "@/components/ui/CharacterAvatar";
 import { IconButton } from "@/components/ui/IconButton";
 import { Switch } from "@/components/ui/Switch";
 import { cn } from "@/lib/cn";
@@ -42,8 +43,9 @@ export function ModCard({
     <article
       role="button"
       tabIndex={0}
-      aria-label={`Open details for ${mod.displayName}`}
-      aria-pressed={selected}
+      data-mod-item
+      aria-label={collectionItemLabel(mod)}
+      aria-expanded={selected}
       onClick={onSelect}
       onKeyDown={cardKeyboardHandler(onSelect)}
       className={cn(
@@ -96,14 +98,12 @@ export function ModCard({
         </h3>
         <p
           className="mt-1 flex items-center gap-1.5 truncate text-[11px] text-zinc-500"
-          title={mod.character || "Uncategorized"}
+          title={mod.character.trim() || "Uncategorized"}
         >
-          <span
-            aria-hidden
-            className={cn(
-              "h-1.5 w-1.5 shrink-0 rounded-full",
-              mod.enabled ? "bg-acid-400" : "bg-zinc-600",
-            )}
+          <CharacterAvatar
+            character={mod.character.trim() || "Uncategorized"}
+            active={mod.enabled}
+            size="xs"
           />
           <span className="truncate">
             {mod.character.trim() || "Uncategorized"}
@@ -178,8 +178,9 @@ export function ModRow({
     <article
       role="button"
       tabIndex={0}
-      aria-label={`Open details for ${mod.displayName}`}
-      aria-pressed={selected}
+      data-mod-item
+      aria-label={collectionItemLabel(mod)}
+      aria-expanded={selected}
       onClick={onSelect}
       onKeyDown={cardKeyboardHandler(onSelect)}
       className={cn(
@@ -203,12 +204,10 @@ export function ModRow({
           {mod.hasConflict ? <Badge tone="hot">Conflict</Badge> : null}
         </div>
         <p className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-[11px] text-zinc-500">
-          <span
-            aria-hidden
-            className={cn(
-              "h-1.5 w-1.5 shrink-0 rounded-full",
-              mod.enabled ? "bg-acid-400" : "bg-zinc-600",
-            )}
+          <CharacterAvatar
+            character={mod.character.trim() || "Uncategorized"}
+            active={mod.enabled}
+            size="xs"
           />
           <span className="truncate">{mod.character.trim() || "Uncategorized"}</span>
           <span className="text-zinc-700">·</span>
@@ -359,4 +358,20 @@ function Thumbnail({
 function initials(mod: InstalledMod): string {
   const source = mod.displayName.trim() || mod.baseName;
   return source.slice(0, 1).toUpperCase();
+}
+
+/**
+ * Screen-reader label for one library card. Spelling out the character, state
+ * and conflict keeps the grid usable without opening every detail panel.
+ */
+function collectionItemLabel(mod: InstalledMod): string {
+  const state = [
+    mod.character.trim() || "Uncategorized",
+    mod.enabled ? null : "disabled",
+    mod.hasConflict ? "conflicting hashes" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  return `Open details for ${mod.displayName} (${state})`;
 }

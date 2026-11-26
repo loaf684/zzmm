@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import {
@@ -21,6 +22,7 @@ import {
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { Button } from "@/components/ui/Button";
+import { CharacterAvatar } from "@/components/ui/CharacterAvatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Notice } from "@/components/ui/Notice";
 import { Panel } from "@/components/ui/Panel";
@@ -106,8 +108,150 @@ function samePath(a: string | null, b: string | null): boolean {
   return normalize(a) === normalize(b);
 }
 
+/**
+ * Arrow-key navigation inside one visible collection. Cards keep their normal
+ * tab order, but Up/Down move a whole row and Left/Right one card, which is
+ * what people expect from a library of this size.
+ */
+function handleCollectionKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+  const target = event.target as HTMLElement;
+  if (!target.hasAttribute("data-mod-item")) return;
+
+  const items = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>("[data-mod-item]"),
+  );
+  const index = items.indexOf(target);
+  if (index < 0) return;
+
+  const columns = Math.max(
+    1,
+    items.filter((item) => item.offsetTop === items[0].offsetTop).length,
+  );
+
+  let next: number;
+  switch (event.key) {
+    case "ArrowRight":
+      next = index + 1;
+      break;
+    case "ArrowLeft":
+      next = index - 1;
+      break;
+    case "ArrowDown":
+      next = index + columns;
+      break;
+    case "ArrowUp":
+      next = index - columns;
+      break;
+    case "Home":
+      next = 0;
+      break;
+    case "End":
+      next = items.length - 1;
+      break;
+    default:
+      return;
+  }
+
+  event.preventDefault();
+  if (next < 0) next = index;
+  if (next >= items.length) next = items.length - 1;
+  items[next]?.focus();
+}
+
+function ModCollection({
+  mods,
+  layout,
+  cardSize,
+  busyFolder,
+  selectedBaseName,
+  onSelect,
+  onToggle,
+  onOpen,
+  onDelete,
+}: {
+  mods: InstalledMod[];
+  layout: ViewMode;
+  cardSize: number;
+  busyFolder: string | null;
+  selectedBaseName: string | null;
+  onSelect: (mod: InstalledMod) => void;
+  onToggle: (mod: InstalledMod, enabled: boolean) => void;
+  onOpen: (mod: InstalledMod) => void;
+  onDelete: (mod: InstalledMod) => void;
+}) {
+  if (layout === "grid") {
+    return (
+      <div
+        className="grid gap-3"
+        onKeyDown={handleCollectionKeyDown}
+        style={{
+          gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`,
+        }}
+      >
+        {mods.map((mod) => (
+          <ModCard
+            key={mod.folderName}
+            mod={mod}
+            busy={busyFolder === mod.folderName}
+            selected={selectedBaseName === mod.baseName}
+            onSelect={() => onSelect(mod)}
+            onToggle={(enabled) => onToggle(mod, enabled)}
+            onOpen={() => onOpen(mod)}
+            onDelete={() => onDelete(mod)}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5" onKeyDown={handleCollectionKeyDown}>
+      {mods.map((mod) => (
+        <ModRow
+          key={mod.folderName}
+          mod={mod}
+          busy={busyFolder === mod.folderName}
+          selected={selectedBaseName === mod.baseName}
+          onSelect={() => onSelect(mod)}
+          onToggle={(enabled) => onToggle(mod, enabled)}
+          onOpen={() => onOpen(mod)}
+          onDelete={() => onDelete(mod)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Placeholder cards for the first scan, so the page does not flash empty. */
+function ScanSkeleton({ cardSize }: { cardSize: number }) {
+  return (
+    <div
+      aria-hidden
+      className="mt-4 grid gap-3"
+      style={{
+        gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`,
+      }}
+    >
+      {Array.from({ length: 8 }, (_, index) => (
+        <div
+          key={index}
+          className="overflow-hidden rounded-2xl border border-ink-800 bg-ink-900/80"
+        >
+          <div className="aspect-[16/10] animate-pulse bg-ink-850 motion-reduce:animate-none" />
+          <div className="space-y-2 px-3.5 pb-3.5 pt-3">
+            <div className="h-3 w-3/4 animate-pulse rounded bg-ink-800 motion-reduce:animate-none" />
+            <div className="h-2.5 w-1/3 animate-pulse rounded bg-ink-800 motion-reduce:animate-none" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function InstalledPage() {
   const view = useSettingsStore((state) => state.view);
+  const loadError = useSettingsStore((state) => state.loadError);
+  const reloadSettings = useSettingsStore((state) => state.load);
 
   const result = useModsStore((state) => state.result);
   const isScanning = useModsStore((state) => state.isScanning);
@@ -243,6 +387,13 @@ export function InstalledPage() {
     [allMods],
   );
 
+  // Counts in the header follow the active filters, so "enabled / disabled"
+  // never contradicts the number of mods actually on screen.
+  const filteredEnabledCount = useMemo(
+    () => filteredMods.filter((mod) => mod.enabled).length,
+    [filteredMods],
+  );
+
   const groups = useMemo(() => groupMods(filteredMods), [filteredMods]);
 
   // Flat view still keeps mods of the same character next to each other, but
@@ -317,7 +468,7 @@ export function InstalledPage() {
             <p className="text-[12px] text-zinc-500">
               {currentResult
                 ? hasActiveFilters
-                  ? `${filteredMods.length} of ${allMods.length} mods · ${currentResult.enabledCount} enabled · ${currentResult.disabledCount} disabled`
+                  ? `${filteredMods.length} of ${allMods.length} mods · ${filteredEnabledCount} enabled · ${filteredMods.length - filteredEnabledCount} disabled`
                   : `${allMods.length} ${allMods.length === 1 ? "mod" : "mods"} · ${currentResult.enabledCount} enabled · ${currentResult.disabledCount} disabled`
                 : "Manage the mods ZZMI loads from your Mods folder."}
             </p>
@@ -327,10 +478,14 @@ export function InstalledPage() {
               Filtered by{" "}
               {[
                 query.trim() ? `“${query.trim()}”` : null,
-                filter !== "all" ? filter : null,
+                filter === "all"
+                  ? null
+                  : filter === "enabled"
+                    ? "enabled only"
+                    : "disabled only",
                 characterFilter !== "all" ? characterFilter : null,
-                hotkeysOnly ? "hotkeys" : null,
-                conflictsOnly ? "conflicts" : null,
+                hotkeysOnly ? "with hotkeys" : null,
+                conflictsOnly ? "with conflicts" : null,
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -361,12 +516,38 @@ export function InstalledPage() {
         </div>
       </header>
 
-      {!view ? (
-        <Panel className="mt-6">
-          <div className="flex items-center gap-3 py-4 text-[12px] text-zinc-400">
-            <Loader2 className="h-4 w-4 animate-spin text-acid-400" aria-hidden />
-            Reading local configuration…
-          </div>
+{!view ? (
+        <Panel
+          className="mt-6"
+          eyebrow={loadError ? "Unavailable" : "Loading"}
+          title={
+            loadError ? "Could not read settings" : "Reading local configuration"
+          }
+          action={
+            loadError ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void reloadSettings()}
+              >
+                Try again
+              </Button>
+            ) : undefined
+          }
+        >
+          {loadError ? (
+            <p className="max-w-xl text-[12px] leading-relaxed text-zinc-500">
+              {loadError}
+            </p>
+          ) : (
+            <div className="flex items-center gap-3 py-4 text-[12px] text-zinc-400">
+              <Loader2
+                className="h-4 w-4 animate-spin text-acid-400"
+                aria-hidden
+              />
+              Reading local configuration...
+            </div>
+          )}
         </Panel>
       ) : !modsDir || !folderValid ? (
         <Panel
@@ -394,6 +575,7 @@ export function InstalledPage() {
                 active={hotkeysOnly}
                 label="Hotkeys"
                 count={hotkeyMods}
+                hint="Show only mods that bind hotkeys"
                 onClick={() => setHotkeysOnly((current) => !current)}
               >
                 <Keyboard className="h-3.5 w-3.5" aria-hidden />
@@ -403,6 +585,7 @@ export function InstalledPage() {
                 active={conflictsOnly}
                 label="Conflicts"
                 count={conflictMods}
+                hint="Show only mods with hash conflicts"
                 onClick={() => setConflictsOnly((current) => !current)}
                 tone={conflictMods > 0 ? "hot" : "default"}
               >
@@ -613,12 +796,10 @@ export function InstalledPage() {
                       {groups.map((group) => (
                         <section key={group.character}>
                           <div className="mb-2 flex items-center gap-2">
-                            <span
-                              aria-hidden
-                              className="flex h-5 w-5 items-center justify-center rounded-full border border-ink-700 bg-ink-900 font-mono text-[9px] text-acid-300"
-                            >
-                              {group.character.slice(0, 1).toUpperCase()}
-                            </span>
+                            <CharacterAvatar
+                              character={group.character}
+                              active
+                            />
                             <h2 className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-400">
                               {group.character}
                             </h2>
@@ -631,96 +812,38 @@ export function InstalledPage() {
                             />
                           </div>
 
-                          {viewMode === "grid" ? (
-                            <div
-                              className="grid gap-3"
-                              style={{
-                                gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`,
-                              }}
-                            >
-                              {group.mods.map((mod) => (
-                                <ModCard
-                                  key={mod.folderName}
-                                  mod={mod}
-                                  busy={busyFolder === mod.folderName}
-                                  selected={selectedBaseName === mod.baseName}
-                                  onSelect={() =>
-                                    setSelectedBaseName(mod.baseName)
-                                  }
-                                  onToggle={(enabled) =>
-                                    void setModEnabled(mod.folderName, enabled)
-                                  }
-                                  onOpen={() =>
-                                    void openModFolder(mod.folderName)
-                                  }
-                                  onDelete={() => setPendingDelete(mod)}
-                                />
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="flex flex-col gap-1.5">
-                              {group.mods.map((mod) => (
-                                <ModRow
-                                  key={mod.folderName}
-                                  mod={mod}
-                                  busy={busyFolder === mod.folderName}
-                                  selected={selectedBaseName === mod.baseName}
-                                  onSelect={() =>
-                                    setSelectedBaseName(mod.baseName)
-                                  }
-                                  onToggle={(enabled) =>
-                                    void setModEnabled(mod.folderName, enabled)
-                                  }
-                                  onOpen={() =>
-                                    void openModFolder(mod.folderName)
-                                  }
-                                  onDelete={() => setPendingDelete(mod)}
-                                />
-                              ))}
-                            </div>
-                          )}
+                          <ModCollection
+                            mods={group.mods}
+                            layout={viewMode}
+                            cardSize={cardSize}
+                            busyFolder={busyFolder}
+                            selectedBaseName={selectedBaseName}
+                            onSelect={(mod) =>
+                              setSelectedBaseName(mod.baseName)
+                            }
+                            onToggle={(mod, enabled) =>
+                              void setModEnabled(mod.folderName, enabled)
+                            }
+                            onOpen={(mod) => void openModFolder(mod.folderName)}
+                            onDelete={(mod) => setPendingDelete(mod)}
+                          />
                         </section>
                       ))}
                     </div>
-                  ) : viewMode === "grid" ? (
-                    <div
-                      className="grid gap-3"
-                      style={{
-                        gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))`,
-                      }}
-                    >
-                      {flatMods.map((mod) => (
-                        <ModCard
-                          key={mod.folderName}
-                          mod={mod}
-                          busy={busyFolder === mod.folderName}
-                          selected={selectedBaseName === mod.baseName}
-                          onSelect={() => setSelectedBaseName(mod.baseName)}
-                          onToggle={(enabled) =>
-                            void setModEnabled(mod.folderName, enabled)
-                          }
-                          onOpen={() => void openModFolder(mod.folderName)}
-                          onDelete={() => setPendingDelete(mod)}
-                        />
-                      ))}
-                    </div>
                   ) : (
-                    <div className="flex flex-col gap-1.5">
-                      {flatMods.map((mod) => (
-                        <ModRow
-                          key={mod.folderName}
-                          mod={mod}
-                          busy={busyFolder === mod.folderName}
-                          selected={selectedBaseName === mod.baseName}
-                          onSelect={() => setSelectedBaseName(mod.baseName)}
-                          onToggle={(enabled) =>
-                            void setModEnabled(mod.folderName, enabled)
-                          }
-                          onOpen={() => void openModFolder(mod.folderName)}
-                          onDelete={() => setPendingDelete(mod)}
-                        />
-                      ))}
-                    </div>
+                    <ModCollection
+                      mods={flatMods}
+                      layout={viewMode}
+                      cardSize={cardSize}
+                      busyFolder={busyFolder}
+                      selectedBaseName={selectedBaseName}
+                      onSelect={(mod) => setSelectedBaseName(mod.baseName)}
+                      onToggle={(mod, enabled) =>
+                        void setModEnabled(mod.folderName, enabled)
+                      }
+                      onOpen={(mod) => void openModFolder(mod.folderName)}
+                      onDelete={(mod) => setPendingDelete(mod)}
+                    />
                   )}
 
                   {hasActiveFilters ? (
@@ -731,7 +854,9 @@ export function InstalledPage() {
                 </div>
               )}
             </>
-          ) : !isScanning && !scanError ? (
+          ) : isScanning ? (
+            <ScanSkeleton cardSize={cardSize} />
+          ) : !scanError ? (
             <Panel className="mt-6" title="No scan yet">
               <Button onClick={() => void scan()}>Scan Mods folder</Button>
             </Panel>
@@ -781,6 +906,7 @@ function FilterChip({
   active,
   label,
   count,
+  hint,
   tone = "default",
   onClick,
   children,
@@ -788,6 +914,7 @@ function FilterChip({
   active: boolean;
   label: string;
   count: number;
+  hint?: string;
   tone?: "default" | "hot";
   onClick: () => void;
   children: ReactNode;
@@ -797,6 +924,7 @@ function FilterChip({
       type="button"
       onClick={onClick}
       aria-pressed={active}
+      title={hint}
       className={cn(
         "inline-flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition-colors duration-150",
         active
@@ -808,7 +936,10 @@ function FilterChip({
     >
       {children}
       <span className="hidden sm:inline">{label}</span>
-      <span className="font-mono text-[10px] text-zinc-600">{count}</span>
+      <span className="font-mono text-[10px] text-zinc-600">
+        {count}
+        <span className="sr-only"> mods</span>
+      </span>
     </button>
   );
 }
