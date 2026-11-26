@@ -2583,45 +2583,64 @@ drawindexed = 3, 0, 0
 
     #[test]
     fn s11_shaped_dump_keeps_every_partition_of_the_body() {
-        // S11Mod laid out small: one position buffer, three index buffers whose
-        // vertex ranges are disjoint and together cover the body (0..2, 3..5,
-        // 6..8 of nine vertices), the first draw asking for more indices than
-        // its buffer holds and the other two draws commented out. Every one of
-        // them is real geometry - QA measured S11's three IBs at 15,604 /
-        // 3,294 / 34 vertices, summing to the 18,932-vertex buffer - so the
-        // preview must draw all three, not treat the commented pair as absent.
-        let scratch = Scratch::new("Tri");
+        // S11Mod's real shape, reproduced: one 18,932-vertex position buffer cut
+        // into three disjoint index buffers (0..15603 / 15604..18897 /
+        // 18898..18931 = 15,604 + 3,294 + 34 vertices), the first draw asking
+        // for 70,221 indices of a 69,273-index buffer, the other two draws
+        // commented out. Every one of them is real geometry - QA measured the
+        // same partition on the real mod - so the preview must draw all three
+        // and report the clamp, 26,162 triangles in total.
+        let scratch = Scratch::new("S11Shape");
         scratch.write_text(
-            "Tri.ini",
-            "[ResourceTriPosition]\nfilename = TriPosition.buf\nstride = 40\n\n\
-             [ResourceTriAIB]\nfilename = TriA.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
-             [ResourceTriBIB]\nfilename = TriB.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
-             [ResourceTriCIB]\nfilename = TriC.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
-             [TextureOverrideTri]\nhash = abc\nhandling = skip\n\n\
-             [TextureOverrideTriA]\nmatch_first_index = 0\nib = ResourceTriAIB\ndrawindexed = 9, 0, 0\n\n\
-             [TextureOverrideTriB]\nmatch_first_index = 3\nib = ResourceTriBIB\n; drawindexed = 3, 0, 0\n\n\
-             [TextureOverrideTriC]\nmatch_first_index = 6\nib = ResourceTriCIB\n; drawindexed = 3, 0, 0\n",
+            "S11Shape.ini",
+            "[ResourceBodyPosition]\nfilename = BodyPosition.buf\nstride = 40\n\n\
+             [ResourceBodyAIB]\nfilename = BodyA.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceBodyBIB]\nfilename = BodyB.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceBodyCIB]\nfilename = BodyC.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverrideBody]\nhash = abc\nhandling = skip\n\n\
+             [TextureOverrideBodyA]\nmatch_first_index = 0\nib = ResourceBodyAIB\ndrawindexed = 70221, 0, 0\n\n\
+             [TextureOverrideBodyB]\nmatch_first_index = 46062\nib = ResourceBodyBIB\n; drawindexed = 9123, 0, 0\n\n\
+             [TextureOverrideBodyC]\nmatch_first_index = 55185\nib = ResourceBodyCIB\n; drawindexed = 90, 0, 0\n",
         );
-        let vertices: Vec<[f32; 3]> = (0..9).map(|i| [i as f32, 0.0, 0.0]).collect();
-        scratch.write("TriPosition.buf", &position_buf(&vertices));
-        scratch.write("TriA.ib", &u16_indices(&[0, 1, 2]));
-        scratch.write("TriB.ib", &u16_indices(&[3, 4, 5]));
-        scratch.write("TriC.ib", &u16_indices(&[6, 7, 8]));
+
+        // 18,932 vertices behind the one buffer, as in the dump.
+        let mut positions = Vec::with_capacity(18_932 * 40);
+        for index in 0..18_932usize {
+            let x = (index % 256) as f32 * 0.01;
+            let y = (index / 256) as f32 * 0.01;
+            for value in [x, y, 0.5f32] {
+                positions.extend_from_slice(&value.to_le_bytes());
+            }
+            positions.extend_from_slice(&[0u8; 28]);
+        }
+        scratch.write("BodyPosition.buf", &positions);
+
+        // Indices that stay inside each submesh's own vertex range.
+        let ring = |from: usize, count: usize, indices: usize| -> Vec<u8> {
+            (0..indices)
+                .flat_map(|slot| {
+                    let vertex = from + (slot % count);
+                    (vertex as u16).to_le_bytes()
+                })
+                .collect()
+        };
+        scratch.write("BodyA.ib", &ring(0, 15_604, 69_273));
+        scratch.write("BodyB.ib", &ring(15_604, 3_294, 9_123));
+        scratch.write("BodyC.ib", &ring(18_898, 34, 90));
 
         let preview = scratch.build().expect("preview");
         assert_eq!(preview.parts.len(), 3, "{:?}", preview.parts);
-        let mut triangles: Vec<u32> = preview
+        let total: u32 = preview
             .parts
             .iter()
             .map(|part| part.triangle_count)
-            .collect();
-        triangles.sort_unstable();
-        assert_eq!(triangles, vec![1, 1, 1], "{:?}", preview.parts);
+            .sum();
+        assert_eq!(total, 26_162, "{:?}", preview.parts);
         assert!(
             preview
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("rendered the 3 that fit")),
+                .any(|warning| warning.contains("rendered the 69273 that fit")),
             "{:?}",
             preview.warnings
         );
