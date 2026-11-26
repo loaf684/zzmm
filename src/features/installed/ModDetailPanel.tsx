@@ -623,6 +623,14 @@ export function ModDetailPanel({
                       {partsWithoutDiffuse} no diffuse
                     </span>
                   ) : null}
+                  {/* Group the informational badges, the view switches and the
+                      actions so five controls do not read at one weight. */}
+                  {previewForMod.togglesApplied || partsWithoutDiffuse > 0 ? (
+                    <span
+                      aria-hidden
+                      className="mx-0.5 h-3.5 w-px bg-white/10"
+                    />
+                  ) : null}
                   <StageToggle
                     // While Wire is on the ink shell is not drawn at all (it
                     // would fill the gap between the wires), so the pill shows
@@ -644,6 +652,7 @@ export function ModDetailPanel({
                     title="Show part wireframes"
                     onClick={() => setWireframe(!wireframe)}
                   />
+                  <span aria-hidden className="mx-0.5 h-3.5 w-px bg-white/10" />
                   <IconButton
                     label="Rebuild 3D preview"
                     onClick={() => void reloadPreview()}
@@ -748,6 +757,12 @@ export function ModDetailPanel({
             previewForMod.toggles.length > 0 ? (
               compactToggles ? (
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-ink-800/80 px-6 py-2.5">
+                  <span className="text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+                    In-game toggles
+                  </span>
+                  <span className="font-mono text-[10px] text-zinc-600">
+                    {toggleCount}
+                  </span>
                   {previewForMod.toggles.map((toggle) => (
                     <div
                       key={toggle.name}
@@ -824,7 +839,13 @@ export function ModDetailPanel({
             {viewerMode === "3d" &&
             previewForMod &&
             previewForMod.parts.length > 1 ? (
-              <div className="flex flex-wrap gap-1.5 border-b border-ink-800/80 px-6 py-2.5">
+              <div className="flex flex-wrap items-center gap-1.5 border-b border-ink-800/80 px-6 py-2.5">
+                <span
+                  className="mr-1 text-[10px] uppercase tracking-[0.14em] text-zinc-600"
+                  title="Click a part chip to show or hide that part"
+                >
+                  Parts
+                </span>
                 {previewForMod.parts.map((part) => {
                   const visible = !hiddenParts.includes(part.name);
                   return (
