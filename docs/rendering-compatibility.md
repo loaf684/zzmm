@@ -40,7 +40,7 @@ requires a particular folder layout, model format, or material naming scheme.
      line sits in a disabled branch. All-disabled means the part is omitted; only
      a buffer with no `drawindexed` line at all (the game's `auto` draw) falls
      back to the whole index buffer.
-   - A whole-line commented `; drawindexed` / `# drawindexed` is the mod switching
+   - A whole-line commented `; drawindexed` / `# drawindexed` line is the mod switching
      that sub-draw off. It is recorded against the index buffer bound at that
      point, but the part is only omitted when the section's hash group also sets
      `handling = skip` and submits no `drawindexed = auto`; otherwise the game
@@ -48,7 +48,7 @@ requires a particular folder layout, model format, or material naming scheme.
    - The hash group's `handling = skip` is tracked with the hash (evaluated
      against the saved toggle state), so a conditional skip the state does not
      take leaves the original draw in place.
-   - Toggle branches evaluate saved user values first, then `draw_type`/`active`
+   - Toggle branches apply the saved user values first, then `draw_type`/`active`
      system defaults. Only drawn variants are kept.
 4. **Scan the folder (`resources::scan_folder`).** Shader-dump mods keep `.buf`,
    `.ib`, and `.dds` files without declaring every one in an INI. The scan adds
@@ -201,6 +201,11 @@ is capped at 1024 px, so the extra source resolution could never be shown.
     bind their IB beside one, redrawing the whole buffer),
   - a skipped hash with no commented draw at all (fail open),
   - a buffer with no `hash` at all.
+- **Per-IB bindings are authoritative:** when a mod binds a diffuse per index
+  buffer (`Resource\ZZMI\Diffuse = ref ...` inside a `TextureOverride` that
+  matches one draw), a slice with no binding of its own is not painted with a
+  sibling's atlas: a part the game still draws renders with the neutral
+  material and the "no diffuse texture is shipped for this part" warning.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
