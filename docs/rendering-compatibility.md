@@ -39,8 +39,10 @@ requires a particular folder layout, model format, or material naming scheme.
    - A buffer with explicit `drawindexed` lines records that fact even when every
      line sits in a disabled branch. All-disabled means the part is omitted; only
      a buffer with no `drawindexed` line at all (the game's `auto` draw) falls
-     back to the whole index buffer. A commented-out `; drawindexed` counts as
-     an explicit line: the mod removed that draw.
+     back to the whole index buffer.
+   - The hash group's `handling = skip` is tracked with the hash, so a section
+     that binds an `ib` but submits no draw is omitted when the original draw is
+     suppressed and kept when it is not.
    - Toggle branches evaluate saved user values first, then `draw_type`/`active`
      system defaults. Only drawn variants are kept.
 4. **Scan the folder (`resources::scan_folder`).** Shader-dump mods keep `.buf`,
@@ -174,19 +176,23 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   (`S11Mod` asks for 70221 of a 69273-index IB). The game still draws the
   buffer, so the preview clamps the range, renders the part that exists and
   names the shortfall instead of hiding the whole mesh.
-- **Commented draws:** a `; drawindexed = ...` line is the mod switching that
-  sub-draw off. `S11Mod`'s three index buffers cover disjoint vertex ranges of
-  the body (15,604 + 3,294 + 34 = 18,932), but its `[TextureOverrideS11BodyIB]`
-  sets `handling = skip` on the shared hash, and only the first range keeps a
-  live replacement `drawindexed`; the other two are commented out. The game
-  submits BodyA only, so `BodyB` (the hip-height bag, 3,041 triangles) is absent
-  in game. The preview used to draw the commented pair as whole buffers and
-  painted the bag back in. A commented draw now registers the index buffer as
-  draw-controlled with no active range, so the part is omitted instead of
-  falling back to the whole buffer. `SoukakuCowBikini`'s mask (696 triangles,
-  `handling = skip`, only a commented draw) is hidden the same way. A section
-  that binds `ib` with no `drawindexed` line at all still draws the whole
-  buffer, because the game's own draw remains in place.
+- **Skipped draws:** 3DMigoto merges every override that shares a `hash`, and
+  `handling = skip` on any of them suppresses the game's original draw for that
+  group. When such a group binds an index buffer but submits no replacement
+  draw, the game draws nothing for it and the preview must omit the part instead
+  of falling back to the whole buffer. `S11Mod` is the case: all four overrides
+  share `hash = e3ee72d9`, `[TextureOverrideS11BodyIB]` sets
+  `handling = skip`, only `BodyA` keeps a live `drawindexed` (clamped to the
+  dump's 69,273 indices), and `BodyB`/`BodyC` are commented out. The game submits
+  BodyA only, so `BodyB` (the hip-height bag, 3,041 triangles) is absent in game;
+  the preview used to paint it back in. `SoukakuCowBikini`'s mask (696 triangles)
+  is hidden the same way. Two shapes keep the whole-buffer fallback: a skipped
+  group that carries `drawindexed = auto` (Nekomata/Astra/Nicole bind their IB
+  beside one) redraws the whole buffer, and a section whose hash is not skipped
+  (`a_rebind_only_index_buffer_still_draws_the_whole_buffer`) still has the
+  game's own draw. A buffer with no `hash` at all always fails open.
+  Conditionally skipped groups follow the saved toggle state: a `handling = skip`
+  inside a branch the state does not take is ignored, so the part is kept.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
