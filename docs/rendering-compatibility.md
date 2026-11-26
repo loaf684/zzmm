@@ -40,6 +40,9 @@ requires a particular folder layout, model format, or material naming scheme.
      line sits in a disabled branch. All-disabled means the part is omitted; only
      a buffer with no `drawindexed` line at all (the game's `auto` draw) falls
      back to the whole index buffer.
+   - The hash group's `handling = skip` is tracked with the hash, so a section
+     that binds an `ib` but submits no draw is omitted when the original draw is
+     suppressed and kept when it is not.
    - Toggle branches evaluate saved user values first, then `draw_type`/`active`
      system defaults. Only drawn variants are kept.
 4. **Scan the folder (`resources::scan_folder`).** Shader-dump mods keep `.buf`,
@@ -173,20 +176,28 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   (`S11Mod` asks for 70221 of a 69273-index IB). The game still draws the
   buffer, so the preview clamps the range, renders the part that exists and
   names the shortfall instead of hiding the whole mesh.
-- **Commented draws:** a `; drawindexed = ...` line is a dump commenting out the
-  *replacement* draw, not geometry that does not exist. `S11Mod`'s three index
-  buffers cover disjoint vertex ranges that together are the whole body
-  (15,604 + 3,294 + 34 = 18,932), and only the first has a live replacement
-  draw; the other two are drawn as the whole buffer, exactly as the game draws
-  them. Treating the commented pair as absent dropped 3,071 real triangles.
+- **Skipped draws:** 3DMigoto merges every override that shares a `hash`, and
+  `handling = skip` on any of them suppresses the game's original draw for that
+  group. When such a group binds an index buffer but submits no replacement
+  draw, the game draws nothing for it and the preview must omit the part instead
+  of falling back to the whole buffer. `S11Mod` is the case: all four overrides
+  share `hash = e3ee72d9`, `[TextureOverrideS11BodyIB]` sets
+  `handling = skip`, only `BodyA` keeps a live `drawindexed` (clamped to the
+  dump's 69,273 indices), and `BodyB`/`BodyC` are commented out. The game submits
+  BodyA only, so `BodyB` (the hip-height bag, 3,041 triangles) is absent in game;
+  the preview used to paint it back in. `SoukakuCowBikini`'s mask (696 triangles)
+  is hidden the same way. Two shapes keep the whole-buffer fallback: a skipped
+  group that carries `drawindexed = auto` (Nekomata/Astra/Nicole bind their IB
+  beside one) redraws the whole buffer, and a section whose hash is not skipped
+  (`a_rebind_only_index_buffer_still_draws_the_whole_buffer`) still has the
+  game's own draw. A buffer with no `hash` at all always fails open.
+  Conditionally skipped groups follow the saved toggle state: a `handling = skip`
+  inside a branch the state does not take is ignored, so the part is kept.
 - **Per-IB bindings are authoritative:** when a mod binds a diffuse per index
   buffer (`Resource\ZZMI\Diffuse = ref ...` inside a `TextureOverride` that
-  matches one draw), an index buffer with no binding of its own is painted by
-  the game, not by a sibling's atlas. `component_core` treats `BodyA`/`BodyB` as
-  variants of one component, so the preview used to borrow the body sheet for
-  S11's bag (`S11BodyB`). Such a part now renders neutral with the
-  "no diffuse texture is shipped for this part" warning, which is honest about
-  what the preview cannot read (the game's own `.blk` texture).
+  matches one draw), a slice with no binding of its own is not painted with a
+  sibling's atlas: a part the game still draws renders with the neutral
+  material and the "no diffuse texture is shipped for this part" warning.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
