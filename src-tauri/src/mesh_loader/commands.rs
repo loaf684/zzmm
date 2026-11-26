@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -260,6 +260,8 @@ fn build_preview(
     // for parts this mod leaves to the game's original texture. Never touches
     // this mod's own files.
     let library = TextureLibrary::build(mods, &root);
+    // One decode per colour map for the whole preview, however many parts bind it.
+    let mut texture_cache = TextureCache::default();
 
     // Variant copies (e.g. `AriaKFCTopPositionFlat` beside `AriaKFCTopPosition`)
     // decode the same component; drawing both stacks identical geometry. Keep
@@ -547,6 +549,7 @@ fn build_preview(
                     piece_scope,
                     &mut warnings,
                     &piece.label,
+                    &mut texture_cache,
                 )
             } else {
                 let preferred = piece
@@ -562,6 +565,7 @@ fn build_preview(
                     piece.index_resource.as_ref(),
                     Some(&harvest),
                     &mut warnings,
+                    &mut texture_cache,
                 )
             };
 
@@ -587,7 +591,7 @@ fn build_preview(
                             "{}: no diffuse is shipped in this mod; using {source} from the mod library for this character.",
                             piece.label
                         ));
-                        texture_match = finish_texture_path(&path, &mut warnings);
+                        texture_match = finish_texture_path(&path, &mut warnings, &mut texture_cache);
                         break;
                     }
                 }
@@ -1204,6 +1208,28 @@ struct TextureMatch {
     has_alpha: bool,
 }
 
+/// Decoded colour maps, keyed by the file they were read from. A mod that binds
+/// the same atlas to many sub-draws would otherwise decode and PNG-encode it
+/// once per part. One installed mod binds three 8192x8192 BC7 maps to nearly
+/// every draw, which made a single preview take over seven minutes.
+#[derive(Default)]
+struct TextureCache {
+    entries: HashMap<PathBuf, Result<texture::PreviewTexture, String>>,
+}
+
+impl TextureCache {
+    fn load(&mut self, path: &Path) -> Result<texture::PreviewTexture, String> {
+        let key = path.to_path_buf();
+        if let Some(cached) = self.entries.get(&key) {
+            return cached.clone();
+        }
+
+        let loaded = texture::load_preview_texture(path).map_err(|error| error.to_string());
+        self.entries.insert(key, loaded.clone());
+        loaded
+    }
+}
+
 fn load_texture(
     root: &Path,
     textures: &[IniResource],
@@ -1212,6 +1238,7 @@ fn load_texture(
     index: Option<&IniResource>,
     harvest: Option<&Harvest>,
     warnings: &mut Vec<String>,
+    cache: &mut TextureCache,
 ) -> TextureMatch {
     let key_is_head = [
         "face", "head", "makeup", "eye", "iris", "mouth", "teeth", "brow",
@@ -1258,7 +1285,7 @@ fn load_texture(
     //    texture name does not contain the component (Yuzuha's Tenga skin).
     if source_confident {
         if let Some(chosen) = preferred_texture {
-            return finish_texture(root, chosen, warnings);
+            return finish_texture(root, chosen, warnings, cache);
         }
     }
 
@@ -1271,7 +1298,7 @@ fn load_texture(
                 && stem.starts_with(&ib_core)
                 && resolve_file(root, texture).is_some()
         }) {
-            return finish_texture(root, chosen, warnings);
+            return finish_texture(root, chosen, warnings, cache);
         }
     }
 
@@ -1279,7 +1306,7 @@ fn load_texture(
     //    check, so a section that draws a sibling mesh cannot leak its colour
     //    map onto this one.
     if let Some(chosen) = preferred_texture {
-        return finish_texture(root, chosen, warnings);
+        return finish_texture(root, chosen, warnings, cache);
     }
 
     // 4. A texture override (`TextureOverride…Diffuse`) supplies the colour
@@ -1310,7 +1337,7 @@ fn load_texture(
         if let Some((_, target)) = best {
             if let Some(chosen) = named_resource(&visible, target, texture_scope) {
                 if !is_data_map(&chosen.lower_stem()) {
-                    return finish_texture(root, chosen, warnings);
+                    return finish_texture(root, chosen, warnings, cache);
                 }
             }
         }
@@ -1326,7 +1353,7 @@ fn load_texture(
                     && candidate.starts_with(&stem)
                     && resolve_file(root, texture).is_some()
             }) {
-                return finish_texture(root, chosen, warnings);
+                return finish_texture(root, chosen, warnings, cache);
             }
         }
 
@@ -1336,7 +1363,7 @@ fn load_texture(
             }) {
                 if let Some(chosen) = named_resource(&visible, target, texture_scope) {
                     if !is_data_map(&chosen.lower_stem()) {
-                        return finish_texture(root, chosen, warnings);
+                        return finish_texture(root, chosen, warnings, cache);
                     }
                 }
             }
@@ -1366,7 +1393,7 @@ fn load_texture(
         });
 
     if let Some(chosen) = chosen {
-        return finish_texture(root, chosen, warnings);
+        return finish_texture(root, chosen, warnings, cache);
     }
 
     // Nothing named this component. Leave it neutral: reusing the mod's only
@@ -1467,7 +1494,12 @@ fn named_resource<'a>(
     })
 }
 
-fn finish_texture(root: &Path, chosen: &IniResource, warnings: &mut Vec<String>) -> TextureMatch {
+fn finish_texture(
+    root: &Path,
+    chosen: &IniResource,
+    warnings: &mut Vec<String>,
+    cache: &mut TextureCache,
+) -> TextureMatch {
     let material = chosen.filename.clone();
 
     let Some(path) = resolve_file(root, chosen) else {
@@ -1480,7 +1512,7 @@ fn finish_texture(root: &Path, chosen: &IniResource, warnings: &mut Vec<String>)
         };
     };
 
-    match texture::load_preview_texture(&path) {
+    match cache.load(&path) {
         Ok(preview) => TextureMatch {
             url: Some(preview.data_url),
             error: None,
@@ -1493,7 +1525,7 @@ fn finish_texture(root: &Path, chosen: &IniResource, warnings: &mut Vec<String>)
                 chosen.filename.clone().unwrap_or_default()
             ));
             TextureMatch {
-                error: Some(error.to_string()),
+                error: Some(error),
                 material,
                 ..TextureMatch::default()
             }
@@ -1512,6 +1544,7 @@ fn load_bound_texture(
     scope: Option<&Path>,
     warnings: &mut Vec<String>,
     label: &str,
+    cache: &mut TextureCache,
 ) -> TextureMatch {
     let candidates: Vec<&IniResource> = textures
         .iter()
@@ -1519,7 +1552,7 @@ fn load_bound_texture(
         .collect();
 
     if let Some(chosen) = named_resource(&candidates, name, scope) {
-        return finish_texture(root, chosen, warnings);
+        return finish_texture(root, chosen, warnings, cache);
     }
 
     warnings.push(format!(
@@ -1528,12 +1561,16 @@ fn load_bound_texture(
     TextureMatch::default()
 }
 
-fn finish_texture_path(path: &Path, warnings: &mut Vec<String>) -> TextureMatch {
+fn finish_texture_path(
+    path: &Path,
+    warnings: &mut Vec<String>,
+    cache: &mut TextureCache,
+) -> TextureMatch {
     let material = path
         .file_name()
         .map(|name| name.to_string_lossy().to_string());
 
-    match texture::load_preview_texture(path) {
+    match cache.load(path) {
         Ok(preview) => TextureMatch {
             url: Some(preview.data_url),
             error: None,
@@ -1543,7 +1580,7 @@ fn finish_texture_path(path: &Path, warnings: &mut Vec<String>) -> TextureMatch 
         Err(error) => {
             warnings.push(format!("Could not decode {}: {error}", path.display()));
             TextureMatch {
-                error: Some(error.to_string()),
+                error: Some(error),
                 material,
                 ..TextureMatch::default()
             }
@@ -1864,6 +1901,229 @@ fn read_limited(path: &Path) -> AppResult<Vec<u8>> {
     }
 
     Ok(fs::read(path)?)
+}
+
+/// End-to-end checks against a synthetic mod folder: real INI text, real
+/// `.buf`/`.ib`/`.dds` bytes on disk, through the same `build_preview` the UI
+/// calls. Unit tests on the individual decoders cannot catch a wrong resource
+/// classification, texture pick, or part split.
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    struct Scratch {
+        root: PathBuf,
+        folder: String,
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+
+            // Tests run in parallel, so each scratch folder needs its own root.
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "zzmm-preview-{}-{unique}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).expect("mod folder");
+            Self {
+                root,
+                folder: name.to_string(),
+                dir,
+            }
+        }
+
+        fn write(&self, relative: &str, bytes: &[u8]) {
+            let path = self.dir.join(relative.replace('/', "\\"));
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("parent folder");
+            }
+            fs::write(path, bytes).expect("write file");
+        }
+
+        fn write_text(&self, relative: &str, text: &str) {
+            self.write(relative, text.as_bytes());
+        }
+
+        fn build(&self) -> AppResult<MeshPreview> {
+            build_preview(&self.root, &self.folder, None)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Positions packed into 40-byte ZZZ-style vertices with zero padding.
+    fn position_buf(vertices: &[[f32; 3]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for vertex in vertices {
+            for value in vertex {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0u8; 28]);
+        }
+        bytes
+    }
+
+    fn u16_indices(indices: &[u16]) -> Vec<u8> {
+        indices.iter().flat_map(|i| i.to_le_bytes()).collect()
+    }
+
+    /// Uncompressed 2x2 BGRA8 DDS with explicit masks, so `parse` sees the
+    /// same pixel format a hand-made texture swap ships.
+    fn bgra_dds(pixels: &[[u8; 4]; 4]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 128];
+        bytes[0..4].copy_from_slice(b"DDS ");
+        bytes[4..8].copy_from_slice(&124u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&2u32.to_le_bytes());
+        bytes[76..80].copy_from_slice(&8u32.to_le_bytes());
+        bytes[84..88].copy_from_slice(&[0, 0, 0, 0]);
+        bytes[88..92].copy_from_slice(&32u32.to_le_bytes());
+        bytes[92..96].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+        bytes[96..100].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+        bytes[100..104].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+        bytes[104..108].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
+        for &[r, g, b, a] in pixels {
+            bytes.extend_from_slice(&[b, g, r, a]);
+        }
+        bytes
+    }
+
+    fn decode<T: Copy>(base64: &str, cast: fn([u8; 4]) -> T) -> Vec<T> {
+        STANDARD
+            .decode(base64)
+            .expect("valid base64")
+            .chunks_exact(4)
+            .map(|chunk| cast([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    fn positions(part: &MeshPart) -> Vec<[f32; 3]> {
+        decode(&part.positions, f32::from_le_bytes)
+            .chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect()
+    }
+
+    fn indices(part: &MeshPart) -> Vec<u32> {
+        decode(&part.indices, u32::from_le_bytes)
+    }
+
+    const BASIC_INI: &str = "\
+[ResourceMyPropPosition]
+filename = MyPropPosition.buf
+stride = 40
+
+[ResourceMyPropTexcoord]
+filename = MyPropTexcoord.buf
+stride = 20
+
+[ResourceMyPropIB]
+filename = MyProp.ib
+format = DXGI_FORMAT_R16_UINT
+
+[ResourceMyPropDiffuse]
+filename = MyPropDiffuse.dds
+
+[TextureOverrideMyProp]
+hash = 12345678
+vb0 = ResourceMyPropPosition
+ib = ResourceMyPropIB
+ps-t0 = ResourceMyPropDiffuse
+drawindexed = 3, 0, 0
+";
+
+    fn basic_mod() -> Scratch {
+        let scratch = Scratch::new("MyProp");
+        scratch.write_text("MyProp.ini", BASIC_INI);
+        scratch.write(
+            "MyPropPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        // f32 UV pairs at the start of a 20-byte texcoord vertex.
+        let mut texcoord = Vec::new();
+        for uv in [[0.0f32, 0.0f32], [0.5, 0.25], [1.0, 1.0]] {
+            for value in uv {
+                texcoord.extend_from_slice(&value.to_le_bytes());
+            }
+            texcoord.extend_from_slice(&[0u8; 12]);
+        }
+        scratch.write("MyPropTexcoord.buf", &texcoord);
+        scratch.write("MyProp.ib", &u16_indices(&[0, 1, 2]));
+        scratch.write(
+            "MyPropDiffuse.dds",
+            &bgra_dds(&[[255, 0, 0, 255]; 4]),
+        );
+        scratch
+    }
+
+
+    #[test]
+    fn builds_one_textured_part_from_a_declared_mod() {
+        let scratch = basic_mod();
+        let preview = scratch.build().expect("preview");
+
+        assert_eq!(preview.parts.len(), 1);
+        let part = &preview.parts[0];
+        assert_eq!(part.vertex_count, 3);
+        assert_eq!(part.triangle_count, 1);
+        assert_eq!(part.material.as_deref(), Some("MyPropDiffuse.dds"));
+        assert!(part.texture.is_some(), "diffuse was not decoded");
+        assert!(!part.has_alpha);
+        assert!(!preview.toggles_applied);
+
+        assert_eq!(
+            positions(part),
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        );
+        assert_eq!(indices(part), vec![0, 1, 2]);
+        // The UV pair must come from the texcoord buffer, not zeros.
+        let uvs = decode(&part.uvs, f32::from_le_bytes);
+        assert_eq!(uvs, vec![0.0, 0.0, 0.5, 0.25, 1.0, 1.0]);
+        // Normals are computed in Rust and normalised.
+        let normals = decode(&part.normals, f32::from_le_bytes);
+        assert_eq!(normals.len(), 9);
+        let length = (normals[0] * normals[0] + normals[1] * normals[1] + normals[2] * normals[2]).sqrt();
+        assert!((length - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn flags_alpha_cutouts_of_a_partial_alpha_texture() {
+        let scratch = basic_mod();
+        // One transparent texel makes the whole diffuse a cutout candidate, the
+        // way hair/lace atlases are packed.
+        scratch.write(
+            "MyPropDiffuse.dds",
+            &bgra_dds(&[[255, 0, 0, 255], [0, 255, 0, 0], [0, 0, 255, 255], [255, 255, 0, 255]]),
+        );
+
+        let preview = scratch.build().expect("preview");
+        assert!(preview.parts[0].has_alpha);
+    }
+
+    #[test]
+    fn ignores_manager_backups_that_would_duplicate_geometry() {
+        let scratch = basic_mod();
+        // Same INI under a backup name: stacking it would render the triangle
+        // twice with stale resource paths.
+        scratch.write_text("DISABLED_MyProp.ini", BASIC_INI);
+        scratch.write_text("MyProp.ini.bak", BASIC_INI);
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 1);
+        assert_eq!(preview.parts[0].triangle_count, 1);
+    }
 }
 
 #[cfg(test)]
@@ -2188,6 +2448,7 @@ mod texture_tests {
             Some(&index),
             Some(&Harvest::default()),
             &mut warnings,
+            &mut TextureCache::default(),
         )
         .material;
 
@@ -2207,6 +2468,7 @@ mod texture_tests {
             None,
             None,
             &mut warnings,
+            &mut TextureCache::default(),
         );
 
         assert!(texture.url.is_none());
@@ -2283,9 +2545,44 @@ mod texture_tests {
             Some(&index),
             Some(&harvest),
             &mut warnings,
+            &mut TextureCache::default(),
         );
 
         assert_eq!(picked.material.as_deref(), Some("Tenga.dds"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decodes_each_colour_map_only_once() {
+        let dir = std::env::temp_dir().join(format!("zzmm-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // A 2x2 uncompressed BGRA DDS, so the first load really decodes pixels.
+        let mut dds = vec![0u8; 128];
+        dds[0..4].copy_from_slice(b"DDS ");
+        dds[4..8].copy_from_slice(&124u32.to_le_bytes());
+        dds[12..16].copy_from_slice(&2u32.to_le_bytes());
+        dds[16..20].copy_from_slice(&2u32.to_le_bytes());
+        dds[88..92].copy_from_slice(&32u32.to_le_bytes());
+        dds[92..96].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+        dds[96..100].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+        dds[100..104].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+        dds[104..108].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
+        dds.extend_from_slice(&[0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255]);
+
+        let path = dir.join("SharedAtlas.dds");
+        std::fs::write(&path, &dds).expect("write dds");
+
+        // The same atlas is bound by every part of a mesh; it must be decoded
+        // and encoded once, not once per part.
+        let mut cache = TextureCache::default();
+        let first = cache.load(&path).expect("first load");
+        let second = cache.load(&path).expect("second load");
+
+        assert_eq!(first.data_url, second.data_url);
+        assert_eq!(cache.entries.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
