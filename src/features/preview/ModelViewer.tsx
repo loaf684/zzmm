@@ -230,6 +230,7 @@ interface PartMeshProps {
   part: MeshPart;
   visible: boolean;
   wireframe: boolean;
+  /** The caller turns this off in wireframe mode: a filled shell hides the wires. */
   outline: boolean;
 }
 
@@ -364,6 +365,13 @@ export function ModelViewer({
       ? { rotation: [0, 0, 0] as [number, number, number], position: [-center.x, -center.y, -center.z] as [number, number, number] }
       : { rotation: [-Math.PI / 2, 0, 0] as [number, number, number], position: [-center.x, -center.z, center.y] as [number, number, number] };
 
+  // Wireframe draws the surface as edges only, so it writes depth along those
+  // edges and nowhere else. The back-face shell is a *filled* surface: with the
+  // outline on, everything between the wires is covered by near-opaque ink and
+  // the model reads as a solid silhouette. Skip the shell in wireframe mode so
+  // the wires stay see-through; the `outline` preference itself is untouched.
+  const showOutline = outline && !wireframe;
+
   return (
     <div
       className={cn(
@@ -416,7 +424,7 @@ export function ModelViewer({
               part={part}
               visible={!hiddenParts.includes(part.name)}
               wireframe={wireframe}
-              outline={outline}
+              outline={showOutline}
             />
           ))}
         </group>
