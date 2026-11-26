@@ -174,4 +174,114 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn nested_ini_under_a_mod_root_is_the_same_mod() {
+        let root = temp_dir();
+        write_file(&root.join("ModA/mod.ini"), "");
+        write_file(&root.join("ModA/sub/inner.ini"), "");
+        write_file(&root.join("ModA/sub/deep/deeper.ini"), "");
+        write_file(&root.join("Wrapper/ModB/mod.ini"), "");
+
+        let roots = find_mod_roots(&root);
+
+        assert_eq!(
+            roots,
+            vec![root.join("ModA"), root.join("Wrapper/ModB")],
+            "a mod root absorbs its own subfolders"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn junk_and_hidden_directories_are_never_scanned() {
+        let root = temp_dir();
+        write_file(&root.join("__MACOSX/ModA/mod.ini"), "");
+        write_file(&root.join(".git/ModB/mod.ini"), "");
+        write_file(&root.join(".hidden/ModC/mod.ini"), "");
+        write_file(&root.join("$RECYCLE.BIN/ModD/mod.ini"), "");
+        write_file(&root.join("Pack/.svn/ModE/mod.ini"), "");
+        write_file(&root.join("Pack/ModF/mod.ini"), "");
+
+        assert_eq!(find_mod_roots(&root), vec![root.join("Pack/ModF")]);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_directory_named_like_an_ini_is_not_a_mod_root() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join("ModA/Sub.ini")).expect("fake ini dir");
+        write_file(&root.join("ModA/readme.txt"), "");
+
+        assert!(!has_ini_file(&root.join("ModA")));
+        assert!(find_mod_roots(&root).is_empty());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ini_detection_is_extension_only_and_case_insensitive() {
+        let root = temp_dir();
+        write_file(&root.join("Upper/MOD.INI"), "");
+        write_file(&root.join("Lower/Mod.Ini"), "");
+        write_file(&root.join("Lookalike/mod.ini.bak"), "");
+        write_file(&root.join("Lookalike/notes.txt"), "");
+        write_file(&root.join("Lookalike/ini"), "");
+
+        assert_eq!(
+            find_mod_roots(&root),
+            vec![root.join("Lower"), root.join("Upper")]
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scanning_stays_bounded_but_finds_reasonably_nested_mods() {
+        let root = temp_dir();
+        let shallow = root.join("a/b/c");
+        write_file(&shallow.join("mod.ini"), "");
+        let deep: PathBuf = (0..12).fold(root.clone(), |path, _| path.join("wrap"));
+        write_file(&deep.join("mod.ini"), "");
+
+        assert_eq!(
+            find_mod_roots(&root),
+            vec![shallow],
+            "deep wrapper chains are guarded against"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_path_is_not_a_mod_root() {
+        let missing = temp_dir().join("never-created");
+
+        assert!(!has_ini_file(&missing));
+        assert!(find_mod_roots(&missing).is_empty());
+    }
+
+    #[test]
+    fn clean_junk_recurses_and_keeps_ordinary_files() {
+        let root = temp_dir();
+        write_file(&root.join("ModA/mod.ini"), "x");
+        write_file(&root.join("ModA/textures/thumbs.db"), "");
+        write_file(&root.join("ModA/textures/.DS_Store"), "");
+        write_file(&root.join("ModA/Sub/desktop.ini"), "");
+        write_file(&root.join("ModA/Sub/__MACOSX/resource.frk"), "");
+        write_file(&root.join("ModA/Sub/keep.txt"), "");
+
+        clean_junk(&root);
+
+        assert!(!root.join("ModA/textures/thumbs.db").exists());
+        assert!(!root.join("ModA/textures/.DS_Store").exists());
+        assert!(!root.join("ModA/Sub/desktop.ini").exists());
+        assert!(!root.join("ModA/Sub/__MACOSX").exists());
+        assert!(root.join("ModA/mod.ini").exists());
+        assert!(root.join("ModA/Sub/keep.txt").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
 }
