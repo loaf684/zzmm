@@ -33,11 +33,14 @@ import { SuggestionInput } from "@/components/ui/SuggestionInput";
 import { Switch } from "@/components/ui/Switch";
 import { KeyCapture } from "@/features/hotkeys/KeyCapture";
 import { ModelViewer } from "@/features/preview/ModelViewer";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { toUserMessage } from "@/lib/errors";
 import { formatBytes, formatIsoDate } from "@/lib/format";
 import { useHotkeysStore } from "@/store/hotkeys";
 import { useModsStore } from "@/store/mods";
 import { usePreviewStore } from "@/store/preview";
+import { toast } from "@/store/toasts";
 import type { InstalledMod, ModHotkey } from "@/types/mods";
 import type { PreviewToggle } from "@/types/preview";
 import { describeHotkey } from "./hotkeyLabels";
@@ -282,6 +285,43 @@ export function ModDetailPanel({
   const toggleCount = previewForMod?.toggles.length ?? 0;
   const compactToggles = toggleCount <= 8;
   const togglesOverridden = Object.keys(toggleValues).length > 0;
+
+  const [savingToggles, setSavingToggles] = useState(false);
+
+  // Writes the chosen values into the loader's d3dx_user.ini, which is the file
+  // the preview itself reads, so the game starts with the outfit on screen.
+  const saveTogglesToGame = async () => {
+    if (Object.keys(toggleValues).length === 0) return;
+    setSavingToggles(true);
+
+    try {
+      const saved = await api.preview.save(mod.folderName, toggleValues);
+      const count = saved.written.length;
+      toast.success(
+        count === 1 ? "Saved 1 toggle to the game" : `Saved ${count} toggles to the game`,
+        `${saved.file}${saved.backup ? ` (backup ${saved.backup})` : ""}`,
+      );
+      if (saved.missing.length > 0) {
+        toast.error(
+          "Some toggles were not saved",
+          `This mod does not declare ${saved.missing.join(", ")}.`,
+        );
+      }
+      if (saved.ambiguous.length > 0) {
+        toast.error(
+          "Skipped toggles declared by several INIs",
+          saved.ambiguous.join(", "),
+        );
+      }
+      // The saved file is now the source of the state, so dropping the preview
+      // overrides shows exactly what the game will load.
+      void resetToggles();
+    } catch (error) {
+      toast.error("Could not save the toggles", toUserMessage(error));
+    } finally {
+      setSavingToggles(false);
+    }
+  };
 
   // The expanded stage belongs to the 3D viewer only; switching to the image
   // carousel or losing the mesh docks it back into the panel. A preview with no
@@ -781,14 +821,25 @@ export function ModDetailPanel({
                     </div>
                   ))}
                   {togglesOverridden ? (
-                    <button
-                      type="button"
-                      onClick={() => void resetToggles()}
-                      className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
-                      title="Return to the in-game toggle state"
-                    >
-                      Reset
-                    </button>
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void saveTogglesToGame()}
+                        disabled={savingToggles}
+                        className="rounded-full border border-acid-400/40 bg-acid-400/10 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-acid-300 transition-colors hover:bg-acid-400/20 disabled:opacity-40"
+                        title="Write these choices into d3dx_user.ini so the game loads the same outfit"
+                      >
+                        {savingToggles ? "Saving..." : "Save to game"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void resetToggles()}
+                        className="rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
+                        title="Return to the in-game toggle state"
+                      >
+                        Reset
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               ) : (
@@ -801,14 +852,25 @@ export function ModDetailPanel({
                       {toggleCount}
                     </span>
                     {togglesOverridden ? (
-                      <button
-                        type="button"
-                        onClick={() => void resetToggles()}
-                        className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
-                        title="Return to the in-game toggle state"
-                      >
-                        Reset
-                      </button>
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void saveTogglesToGame()}
+                          disabled={savingToggles}
+                          className="rounded-full border border-acid-400/40 bg-acid-400/10 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-acid-300 transition-colors hover:bg-acid-400/20 disabled:opacity-40"
+                          title="Write these choices into d3dx_user.ini so the game loads the same outfit"
+                        >
+                          {savingToggles ? "Saving..." : "Save to game"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void resetToggles()}
+                          className="rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
+                          title="Return to the in-game toggle state"
+                        >
+                          Reset
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                   <div className="mt-2 grid max-h-44 grid-cols-1 gap-x-6 gap-y-1.5 overflow-y-auto pr-1 sm:grid-cols-2">
