@@ -2582,14 +2582,16 @@ drawindexed = 3, 0, 0
     }
 
     #[test]
-    fn s11_shaped_dump_keeps_every_partition_of_the_body() {
+    fn a_commented_drawindexed_does_not_draw_the_whole_submesh() {
         // S11Mod's real shape, reproduced: one 18,932-vertex position buffer cut
         // into three disjoint index buffers (0..15603 / 15604..18897 /
-        // 18898..18931 = 15,604 + 3,294 + 34 vertices), the first draw asking
-        // for 70,221 indices of a 69,273-index buffer, the other two draws
-        // commented out. Every one of them is real geometry - QA measured the
-        // same partition on the real mod - so the preview must draw all three
-        // and report the clamp, 26,162 triangles in total.
+        // 18898..18931 = 15,604 + 3,294 + 34 vertices). Only the first draw is
+        // replaced (`drawindexed = 70221` of the 69,273-index dump); the other
+        // two are commented out, and the mod's `handling = skip` on the shared
+        // hash removes the originals. The game therefore submits BodyA only -
+        // BodyB is the bag (hip-height island) the owner does not see in game.
+        // The preview used to draw B and C as whole buffers, painting the bag
+        // back in; a commented draw must stay undrawn.
         let scratch = Scratch::new("S11Shape");
         scratch.write_text(
             "S11Shape.ini",
@@ -2629,13 +2631,10 @@ drawindexed = 3, 0, 0
         scratch.write("BodyC.ib", &ring(18_898, 34, 90));
 
         let preview = scratch.build().expect("preview");
-        assert_eq!(preview.parts.len(), 3, "{:?}", preview.parts);
-        let total: u32 = preview
-            .parts
-            .iter()
-            .map(|part| part.triangle_count)
-            .sum();
-        assert_eq!(total, 26_162, "{:?}", preview.parts);
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "BodyA", "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 23_091, "{:?}", preview.parts);
+        // The live draw still clamps to the dump's real index count.
         assert!(
             preview
                 .warnings
@@ -2644,6 +2643,30 @@ drawindexed = 3, 0, 0
             "{:?}",
             preview.warnings
         );
+    }
+
+    #[test]
+    fn a_rebind_only_index_buffer_still_draws_the_whole_buffer() {
+        // The other side of the rule: a section that only rebinds `ib` and
+        // never writes a `drawindexed` line leaves the game's own draw in
+        // place, so the whole buffer is the draw. This must keep rendering -
+        // only a *commented-out* draw means "the mod removed this geometry".
+        let scratch = Scratch::new("Rebind");
+        scratch.write_text(
+            "Rebind.ini",
+            "[ResourcePropPosition]\nfilename = PropPosition.buf\nstride = 40\n\n\
+             [ResourcePropIB]\nfilename = Prop.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverridePropIB]\nib = ResourcePropIB\n",
+        );
+        scratch.write(
+            "PropPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        scratch.write("Prop.ib", &u16_indices(&[0, 1, 2]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 1, "{:?}", preview.parts);
     }
 
     #[test]

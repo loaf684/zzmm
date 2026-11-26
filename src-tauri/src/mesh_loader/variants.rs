@@ -570,6 +570,17 @@ pub fn harvest(lines: &[IniLine], state: &ToggleState) -> Harvest {
             let text = strip_comment(&lines[index].text);
             if !text.is_empty() {
                 settings.push(text.to_string());
+            } else if is_disabled_drawindexed(&lines[index].text) {
+                // A commented-out `drawindexed` is the mod switching that draw
+                // off, not a line that never existed: the XXMI dump writes the
+                // replacement draw live and the modder comments it out to drop
+                // the submesh. Feed it to the walker as a draw with no parsable
+                // range so the IB is recorded as explicitly draw-controlled and
+                // the "no geometry" path fires instead of drawing the whole
+                // buffer, which the game never submits (`handling = skip` on
+                // the shared hash removes the original draw). S11's bag and
+                // Soukaku's mask are hidden exactly this way.
+                settings.push("drawindexed".to_string());
             }
         }
         sections.entry(lower).or_default().extend(settings);
@@ -1199,6 +1210,26 @@ struct Frame {
 fn strip_comment(line: &str) -> &str {
     let cut = line.find([';', '；']).unwrap_or(line.len());
     line[..cut].trim()
+}
+
+/// True when the whole line is a comment that disables a `drawindexed` call:
+/// `; drawindexed = 9123, 0, 0`. The ini parser keeps comments, so the raw text
+/// still carries the command; `walk` needs it to know the index buffer is
+/// draw-controlled even though this particular draw was turned off.
+fn is_disabled_drawindexed(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(body) = trimmed
+        .strip_prefix(';')
+        .or_else(|| trimmed.strip_prefix('#'))
+        .or_else(|| trimmed.strip_prefix('；'))
+    else {
+        return false;
+    };
+
+    body.trim_start()
+        .split(|character: char| character.is_whitespace() || character == '=')
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("drawindexed"))
 }
 
 fn split_assignment(line: &str) -> Option<(&str, &str)> {

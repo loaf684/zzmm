@@ -39,7 +39,8 @@ requires a particular folder layout, model format, or material naming scheme.
    - A buffer with explicit `drawindexed` lines records that fact even when every
      line sits in a disabled branch. All-disabled means the part is omitted; only
      a buffer with no `drawindexed` line at all (the game's `auto` draw) falls
-     back to the whole index buffer.
+     back to the whole index buffer. A commented-out `; drawindexed` counts as
+     an explicit line: the mod removed that draw.
    - Toggle branches evaluate saved user values first, then `draw_type`/`active`
      system defaults. Only drawn variants are kept.
 4. **Scan the folder (`resources::scan_folder`).** Shader-dump mods keep `.buf`,
@@ -173,12 +174,19 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   (`S11Mod` asks for 70221 of a 69273-index IB). The game still draws the
   buffer, so the preview clamps the range, renders the part that exists and
   names the shortfall instead of hiding the whole mesh.
-- **Commented draws:** a `; drawindexed = ...` line is a dump commenting out the
-  *replacement* draw, not geometry that does not exist. `S11Mod`'s three index
-  buffers cover disjoint vertex ranges that together are the whole body
-  (15,604 + 3,294 + 34 = 18,932), and only the first has a live replacement
-  draw; the other two are drawn as the whole buffer, exactly as the game draws
-  them. Treating the commented pair as absent dropped 3,071 real triangles.
+- **Commented draws:** a `; drawindexed = ...` line is the mod switching that
+  sub-draw off. `S11Mod`'s three index buffers cover disjoint vertex ranges of
+  the body (15,604 + 3,294 + 34 = 18,932), but its `[TextureOverrideS11BodyIB]`
+  sets `handling = skip` on the shared hash, and only the first range keeps a
+  live replacement `drawindexed`; the other two are commented out. The game
+  submits BodyA only, so `BodyB` (the hip-height bag, 3,041 triangles) is absent
+  in game. The preview used to draw the commented pair as whole buffers and
+  painted the bag back in. A commented draw now registers the index buffer as
+  draw-controlled with no active range, so the part is omitted instead of
+  falling back to the whole buffer. `SoukakuCowBikini`'s mask (696 triangles,
+  `handling = skip`, only a commented draw) is hidden the same way. A section
+  that binds `ib` with no `drawindexed` line at all still draws the whole
+  buffer, because the game's own draw remains in place.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
