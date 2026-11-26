@@ -2421,6 +2421,43 @@ mod texture_tests {
     }
 
     #[test]
+    fn a_menu_only_toggle_is_not_a_control() {
+        // The slot menu rebinds `ps-t100` on its own art, without a draw, and
+        // the item flags it flips still have to earn their place: a flag that
+        // only switches menu art must not appear next to a body part toggle.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $oiled = 0\r\n\
+             global persist $jacket = 1\r\n\
+             [CommandListClickedSlot]\r\n\
+             $oiled = 1 - $oiled\r\n\
+             $jacket = 1 - $jacket\r\n\
+             [CommandListSlotItemImage]\r\n\
+             if $oiled == 0\r\n\
+             \tps-t100 = ResourceMenuItem.1\r\n\
+             else\r\n\
+             \tps-t100 = ResourceMenuItem.1Hover\r\n\
+             endif\r\n\
+             [TextureOverrideJacket]\r\n\
+             if $jacket == 1\r\n\
+             \tvb0 = ResourceJacketOn\r\n\
+             \tib = ResourceJacketOnIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceJacketOff\r\n\
+             \tib = ResourceJacketOffIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let names: Vec<&str> = toggles.iter().map(|toggle| toggle.name.as_str()).collect();
+        assert_eq!(names, vec!["jacket"], "{toggles:?}");
+    }
+
+    #[test]
     fn an_override_flips_the_variant_the_preview_draws() {
         let parsed = vec![parsed_ini(
             "[Constants]\r\n\

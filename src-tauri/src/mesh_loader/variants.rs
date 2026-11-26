@@ -1009,6 +1009,28 @@ fn looks_like_null_texture(resource: &str) -> bool {
     resource.to_ascii_lowercase().contains("null")
 }
 
+/// Menu art a mod binds for its own on-screen UI. Rebinding it changes what the
+/// menu looks like, never what the character renders, so it must not make a
+/// menu flag look like a mesh control (the slot menu's `$menu`, `$oiled`,
+/// `$nails` all rebind `ps-t100` art this way).
+fn looks_like_ui_texture(resource: &str) -> bool {
+    [
+        "menuitem",
+        "menubg",
+        "menu.",
+        "renderimage",
+        "credit",
+        "preview",
+        "slotitem",
+        "slotbg",
+        "slider",
+        "cursor",
+        "hover",
+    ]
+    .iter()
+    .any(|marker| resource.to_ascii_lowercase().contains(marker))
+}
+
 fn looks_like_data_texture(resource: &str) -> bool {
     [
         "normal",
@@ -1659,31 +1681,43 @@ pub fn harvest_signature(harvest: &Harvest) -> Vec<String> {
         harvest.active.len() + harvest.textures.len() + harvest.index_texture.len() + harvest.draws.len(),
     );
 
+    let hidden = |resource: &str| {
+        looks_like_data_texture(resource)
+            || looks_like_null_texture(resource)
+            || looks_like_ui_texture(resource)
+    };
+
     for name in &harvest.active {
-        if looks_like_data_texture(name) || looks_like_null_texture(name) {
+        if hidden(name) {
             continue;
         }
         out.push(format!("a:{name}"));
     }
     for (position, texture) in &harvest.textures {
-        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+        if hidden(texture) {
             continue;
         }
         out.push(format!("t:{position}:{texture}"));
     }
     for (index, texture) in &harvest.index_texture {
-        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+        if hidden(texture) {
             continue;
         }
         out.push(format!("i:{index}:{texture}"));
     }
     for (index, ranges) in &harvest.draws {
         for range in ranges {
+            // The geometry of a draw is always part of the fingerprint; only the
+            // colour map is dropped when it is menu art, so a flag that merely
+            // switches the mod's on-screen menu cannot look like a mesh change.
+            let texture = range
+                .texture
+                .as_deref()
+                .filter(|texture| !hidden(texture))
+                .unwrap_or("");
             out.push(format!(
-                "d:{index}:{}:{}:{}",
-                range.count,
-                range.start,
-                range.texture.as_deref().unwrap_or("")
+                "d:{index}:{}:{}:{texture}",
+                range.count, range.start
             ));
         }
     }
