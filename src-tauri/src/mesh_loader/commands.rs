@@ -582,6 +582,16 @@ fn build_preview(
         } else {
             let plan_count = plans.len();
             for plan in plans {
+                // The mod suppresses the game's original draw for this hash
+                // (`handling = skip`) and submits no replacement range for this
+                // index buffer: in game nothing is drawn here. S11's bag
+                // (BodyB) and Soukaku's mask are removed exactly this way. A
+                // group that rebinds `ib` beside `drawindexed = auto`, or whose
+                // hash is not skipped, keeps the whole-buffer fallback because
+                // the game still draws it.
+                if plan.ranges.is_none() && harvest.omits_index_draw(&plan.resource.section) {
+                    continue;
+                }
                 let Some(index_path) = resolve_file(&root, &plan.resource) else {
                     warnings.push(format!(
                         "{label}: index buffer {} was not found on disk.",
@@ -2602,14 +2612,17 @@ drawindexed = 3, 0, 0
     }
 
     #[test]
-    fn s11_shaped_dump_keeps_every_partition_of_the_body() {
+    fn a_skipped_hash_group_contributes_no_part() {
         // S11Mod's real shape, reproduced: one 18,932-vertex position buffer cut
         // into three disjoint index buffers (0..15603 / 15604..18897 /
-        // 18898..18931 = 15,604 + 3,294 + 34 vertices), the first draw asking
-        // for 70,221 indices of a 69,273-index buffer, the other two draws
-        // commented out. Every one of them is real geometry - QA measured the
-        // same partition on the real mod - so the preview must draw all three
-        // and report the clamp, 26,162 triangles in total.
+        // 18898..18931 = 15,604 + 3,294 + 34 vertices), the first replaced with
+        // a live `drawindexed = 70221` (of the 69,273-index dump) and the other
+        // two commented out. All four overrides share `hash = abc`, and the
+        // `...IB` section sets `handling = skip`, so the game submits BodyA
+        // only - BodyB is the bag (hip-height island) the owner does not see.
+        // The preview used to draw B and C as whole buffers, painting the bag
+        // back in; a skipped hash group with no replacement draw contributes
+        // nothing.
         let scratch = Scratch::new("S11Shape");
         scratch.write_text(
             "S11Shape.ini",
@@ -2618,9 +2631,9 @@ drawindexed = 3, 0, 0
              [ResourceBodyBIB]\nfilename = BodyB.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
              [ResourceBodyCIB]\nfilename = BodyC.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
              [TextureOverrideBody]\nhash = abc\nhandling = skip\n\n\
-             [TextureOverrideBodyA]\nmatch_first_index = 0\nib = ResourceBodyAIB\ndrawindexed = 70221, 0, 0\n\n\
-             [TextureOverrideBodyB]\nmatch_first_index = 46062\nib = ResourceBodyBIB\n; drawindexed = 9123, 0, 0\n\n\
-             [TextureOverrideBodyC]\nmatch_first_index = 55185\nib = ResourceBodyCIB\n; drawindexed = 90, 0, 0\n",
+             [TextureOverrideBodyA]\nhash = abc\nmatch_first_index = 0\nib = ResourceBodyAIB\ndrawindexed = 70221, 0, 0\n\n\
+             [TextureOverrideBodyB]\nhash = abc\nmatch_first_index = 46062\nib = ResourceBodyBIB\n; drawindexed = 9123, 0, 0\n\n\
+             [TextureOverrideBodyC]\nhash = abc\nmatch_first_index = 55185\nib = ResourceBodyCIB\n; drawindexed = 90, 0, 0\n",
         );
 
         // 18,932 vertices behind the one buffer, as in the dump.
@@ -2649,13 +2662,10 @@ drawindexed = 3, 0, 0
         scratch.write("BodyC.ib", &ring(18_898, 34, 90));
 
         let preview = scratch.build().expect("preview");
-        assert_eq!(preview.parts.len(), 3, "{:?}", preview.parts);
-        let total: u32 = preview
-            .parts
-            .iter()
-            .map(|part| part.triangle_count)
-            .sum();
-        assert_eq!(total, 26_162, "{:?}", preview.parts);
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "BodyA", "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 23_091, "{:?}", preview.parts);
+        // The live draw still clamps to the dump's real index count.
         assert!(
             preview
                 .warnings
@@ -2732,6 +2742,56 @@ drawindexed = 3, 0, 0
             .warnings
             .iter()
             .any(|warning| warning.contains("no diffuse texture is shipped")));
+    }
+
+    #[test]
+    fn a_rebind_only_index_buffer_still_draws_the_whole_buffer() {
+        // The other side of the rule: a section that only rebinds `ib` and
+        // never writes a `drawindexed` line leaves the game's own draw in
+        // place, so the whole buffer is the draw. This must keep rendering -
+        // only a *skipped* hash group with nothing submitted means "the mod
+        // removed this geometry".
+        let scratch = Scratch::new("Rebind");
+        scratch.write_text(
+            "Rebind.ini",
+            "[ResourcePropPosition]\nfilename = PropPosition.buf\nstride = 40\n\n\
+             [ResourcePropIB]\nfilename = Prop.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverridePropIB]\nib = ResourcePropIB\n",
+        );
+        scratch.write(
+            "PropPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        scratch.write("Prop.ib", &u16_indices(&[0, 1, 2]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 1, "{:?}", preview.parts);
+    }
+
+    #[test]
+    fn a_skipped_group_with_drawindexed_auto_keeps_the_whole_buffer() {
+        // Nekomata/Astra/Nicole shape: `handling = skip` + `drawindexed = auto`
+        // in the `...IB` section replaces the original draw with the whole
+        // bound buffer, and a sibling section binds the mod's IB. The group
+        // does submit geometry, so the part must survive the skip rule.
+        let scratch = Scratch::new("AutoDraw");
+        scratch.write_text(
+            "AutoDraw.ini",
+            "[ResourceHairPosition]\nfilename = HairPosition.buf\nstride = 40\n\n\
+             [ResourceHairAIB]\nfilename = HairA.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverrideHairIB]\nhash = abc\nhandling = skip\ndrawindexed = auto\n\n\
+             [TextureOverrideHairA]\nhash = abc\nmatch_first_index = 0\nib = ResourceHairAIB\n",
+        );
+        scratch.write(
+            "HairPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        scratch.write("HairA.ib", &u16_indices(&[0, 1, 2]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 1, "{:?}", preview.parts);
     }
 
     #[test]

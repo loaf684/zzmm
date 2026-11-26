@@ -127,6 +127,26 @@ pub struct Harvest {
     /// unbinds the slot, so a draw after the clear must not inherit the
     /// previous binding.
     pub cleared: HashSet<String>,
+    /// Section → its `hash =` value. 3DMigoto merges every override that
+    /// shares a hash, so the hash is how a `handling = skip` in one section
+    /// suppresses the draw another section binds.
+    pub section_hashes: HashMap<String, String>,
+    /// Hash values whose original draw is suppressed (`handling = skip`) for
+    /// the current saved toggle state. A conditional skip in a branch the
+    /// state does not take is not recorded, so the preview keeps the part.
+    pub skipped_hashes: HashSet<String>,
+    /// Sections that suppress the original draw but declare no hash (matched
+    /// by `match_first_index` alone); tracked separately so the failure mode
+    /// stays fail-open when no hash identifies the group.
+    pub skipped_sections: HashSet<String>,
+    /// Hash values that submit a replacement `drawindexed = auto`: the whole
+    /// bound buffer is the draw. S11-style commented draws in a skipped group
+    /// have no such line, while Nekomata/Astra/Nicole bind their IB beside one.
+    pub auto_draw_hashes: HashSet<String>,
+    /// Index-buffer resource → the sections that bind it with `ib =` in the
+    /// current state. Used to tell "the game skips this draw" from "the game's
+    /// own draw paints this buffer whole".
+    pub index_sections: HashMap<String, BTreeSet<String>>,
 }
 
 impl Harvest {
@@ -186,6 +206,46 @@ impl Harvest {
         binds_like(&self.bound_indices, section)
     }
 
+    /// True when this section belongs to a hash group whose original draw the
+    /// mod suppresses with `handling = skip` for the current toggle state.
+    fn skips_original_draw(&self, section: &str) -> bool {
+        let key = section.to_ascii_lowercase();
+        if self.skipped_sections.contains(&key) {
+            return true;
+        }
+        self.section_hashes
+            .get(&key)
+            .is_some_and(|hash| self.skipped_hashes.contains(hash))
+    }
+
+    /// True when the section's hash group submits a replacement
+    /// `drawindexed = auto`, which draws the whole bound buffer.
+    fn auto_draws_whole_buffer(&self, section: &str) -> bool {
+        self.section_hashes
+            .get(&section.to_ascii_lowercase())
+            .is_some_and(|hash| self.auto_draw_hashes.contains(hash))
+    }
+
+    /// True when the game submits no geometry for this index buffer: the mod
+    /// suppresses the original draw of its hash group (`handling = skip`) and
+    /// every section that binds the buffer leaves it undrawn (no active
+    /// `drawindexed` range, no `drawindexed = auto`). The preview must then
+    /// omit the part instead of falling back to the whole buffer.
+    ///
+    /// Fails open: an unbound buffer, or one whose binding section has no hash,
+    /// is never reported as skipped, so a mod that relies on the game's own
+    /// draw keeps its part.
+    pub fn omits_index_draw(&self, index_resource: &str) -> bool {
+        let Some(sections) = self.index_sections.get(&index_resource.to_ascii_lowercase())
+        else {
+            return false;
+        };
+        !sections.is_empty()
+            && sections.iter().all(|section| {
+                self.skips_original_draw(section) && !self.auto_draws_whole_buffer(section)
+            })
+    }
+
     /// Merge another INI's harvest: mods may spread their sections over
     /// several files.
     pub fn absorb(&mut self, other: Harvest) {
@@ -203,6 +263,16 @@ impl Harvest {
         self.bound_positions.extend(other.bound_positions);
         self.bound_indices.extend(other.bound_indices);
         self.cleared.extend(other.cleared);
+        self.section_hashes.extend(other.section_hashes);
+        self.skipped_hashes.extend(other.skipped_hashes);
+        self.skipped_sections.extend(other.skipped_sections);
+        self.auto_draw_hashes.extend(other.auto_draw_hashes);
+        for (resource, sections) in other.index_sections {
+            self.index_sections
+                .entry(resource)
+                .or_default()
+                .extend(sections);
+        }
         for (resource, ranges) in other.draws {
             let entry = self.draws.entry(resource).or_default();
             for range in ranges {
@@ -633,6 +703,14 @@ struct SectionRun {
     ib_cleared: bool,
     match_first: u32,
     section: String,
+    /// `hash =` of this section, lower-cased. Groups every override 3DMigoto
+    /// merges for one draw.
+    hash: Option<String>,
+    /// An active `handling = skip`: the game's original draw is suppressed.
+    skip_original: bool,
+    /// An active `drawindexed = auto`: the whole bound buffer is redrawn in
+    /// place of the suppressed original.
+    auto_draw: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -739,7 +817,12 @@ fn walk(
                     run.drawn_ibs.insert(ib);
                 }
                 if active(&frames) {
-                    if let Some((count, start)) = parse_drawindexed(rest) {
+                    // `drawindexed = auto` redraws the whole bound buffer; it
+                    // has no numeric range, but it *is* a submitted draw, so a
+                    // skipped hash group that carries one must keep its part.
+                    if rest.eq_ignore_ascii_case("auto") {
+                        run.auto_draw = true;
+                    } else if let Some((count, start)) = parse_drawindexed(rest) {
                         run.draws.push(Draw {
                             ib: run.current_ib.clone(),
                             position: run.current_position.clone(),
@@ -764,6 +847,26 @@ fn walk(
             continue;
         };
         let key = key.trim().to_ascii_lowercase();
+
+        // `hash =` names the draw call this override replaces; `handling =
+        // skip` suppresses that draw. 3DMigoto merges every override sharing a
+        // hash into one group, so a skip on the group's `...IB` section removes
+        // the original draw that a sibling `...A` section binds an IB for.
+        if key == "hash" {
+            if active(&frames) {
+                let hash = value.trim().to_ascii_lowercase();
+                if !hash.is_empty() && hash != "null" {
+                    run.hash = Some(hash);
+                }
+            }
+            continue;
+        }
+        if key == "handling" {
+            if active(&frames) && value.trim().eq_ignore_ascii_case("skip") {
+                run.skip_original = true;
+            }
+            continue;
+        }
 
         // `Resource\ZZMI\Diffuse = ref ResourceBody.Base`: the game's diffuse
         // slot, resolved by the importer through `run` command lists. The
@@ -891,6 +994,35 @@ fn fold(run: &SectionRun, out: &mut Harvest) {
     }
     for (resource, _) in &indexes {
         out.bound_indices.insert((*resource).to_string());
+    }
+
+    // Record the draw-call group (`hash =`) and whether this section suppresses
+    // the group's original draw. A hash shared by an `...IB` section
+    // (`handling = skip`, maybe `drawindexed = auto`) and an `...A` section
+    // (`ib = Resource...`) is one group in 3DMigoto.
+    if let Some(hash) = &run.hash {
+        out.section_hashes.insert(run.section.clone(), hash.clone());
+        if run.skip_original {
+            out.skipped_hashes.insert(hash.clone());
+        }
+        if run.auto_draw {
+            out.auto_draw_hashes.insert(hash.clone());
+        }
+    } else if run.skip_original {
+        out.skipped_sections.insert(run.section.clone());
+    }
+
+    // Sections that bind an index buffer in the current state. The loader uses
+    // this to tell "the mod suppresses this draw and submits nothing" (S11's
+    // bag) from "the mod only rebinds the buffer and the game's own draw paints
+    // it whole" (Nekomata's hair).
+    for (resource, active) in &indexes {
+        if *active {
+            out.index_sections
+                .entry((*resource).to_string())
+                .or_default()
+                .insert(run.section.clone());
+        }
     }
 
     // A real variant toggle: the game draws exactly one of the alternatives a
@@ -2524,6 +2656,72 @@ mod tests {
             harvest.draws_for("ResourceBodyBIB"),
             Some(&[range(3, 0)][..])
         );
+    }
+
+    #[test]
+    fn omits_only_index_buffers_a_skipped_group_leaves_undrawn() {
+        // Three index buffers in three situations:
+        // - BodyBIB: its hash group is skipped and nothing replaces the draw,
+        //   so the game submits no geometry for it (S11's bag).
+        // - BodyAIB: same skipped group, but a sibling section rebinds it beside
+        //   `drawindexed = auto`, so the whole buffer is redrawn.
+        // - PropIB: no hash at all, so the game's own draw still paints it.
+        let ini = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             handling = skip\r\n\
+             drawindexed = auto\r\n\
+             \r\n\
+             [TextureOverrideBodyA]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyAIB\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n\
+             ; drawindexed = 9123, 0, 0\r\n\
+             \r\n\
+             [TextureOverridePropIB]\r\n\
+             ib = ResourcePropIB\r\n",
+        );
+
+        let tracked = harvest(&ini, &ToggleState::default());
+
+        assert!(!tracked.omits_index_draw("ResourceBodyAIB"));
+        assert!(!tracked.omits_index_draw("ResourcePropIB"));
+        // With `drawindexed = auto` in the group every buffer it could bind is
+        // redrawn whole, so even BodyB keeps its part here.
+        assert!(!tracked.omits_index_draw("ResourceBodyBIB"));
+
+        let no_auto = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             handling = skip\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n\
+             ; drawindexed = 9123, 0, 0\r\n",
+        );
+        let skipped_group = harvest(&no_auto, &ToggleState::default());
+        assert!(skipped_group.omits_index_draw("ResourceBodyBIB"));
+
+        // A `handling = skip` inside a branch the saved state does not take
+        // leaves the original draw in place, so the part is kept.
+        let conditional = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             if $hide == 1\r\n\
+             handling = skip\r\n\
+             endif\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n",
+        );
+        let state = state(&[("hide", "0")]);
+        let gated = harvest(&conditional, &state);
+        assert!(!gated.omits_index_draw("ResourceBodyBIB"));
     }
 
     #[test]
