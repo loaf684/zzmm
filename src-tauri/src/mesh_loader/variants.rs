@@ -8,7 +8,7 @@
 //! `[TextureOverride*]` sections, so evaluating those blocks with the saved
 //! values selects exactly the variant the game shows.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::ini_parser::parser::{self, IniLine};
@@ -38,6 +38,12 @@ impl ToggleState {
         if !self.values.contains_key(name) {
             self.values.insert(name.to_string(), value.to_string());
         }
+    }
+
+    /// Force a value, regardless of the INI default or saved state. Used for
+    /// the viewer's explicit toggle overrides.
+    pub fn set(&mut self, name: &str, value: &str) {
+        self.insert(name.to_ascii_lowercase(), value.to_string());
     }
 
     /// Overlay values saved by 3DMigoto on top of the INI defaults.
@@ -1423,11 +1429,159 @@ impl ExprParser<'_> {
                     Err(_) => Some(Value::Text(raw.to_string())),
                 }
             }
-            // System values (`DRAW_TYPE`, `cursor_showing`, …) are unknown, so
+            // System values (`DRAW_TYPE`, `cursor_showing`, ...) are unknown, so
             // the comparison stays undecided and the caller fails open.
             Token::Word | Token::Op(_) => None,
         }
     }
+}
+
+/// Variable names used as operands inside `if` / `elif` / `else if`
+/// conditions. Only these can gate a binding, so only these can change what
+/// the preview draws.
+pub fn condition_variables(lines: &[IniLine]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for section in parser::sections(lines) {
+        for index in section.header + 1..section.end {
+            let text = strip_comment(&lines[index].text);
+            if text.is_empty() {
+                continue;
+            }
+            let (word, rest) = split_word(text);
+            match word.to_ascii_lowercase().as_str() {
+                "if" | "elif" => collect_condition_vars(rest, &mut names),
+                "else" => {
+                    let condition = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+                    if let Some(condition) = condition.strip_prefix("if") {
+                        collect_condition_vars(condition, &mut names);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+fn collect_condition_vars(expr: &str, out: &mut BTreeSet<String>) {
+    for token in tokenize(expr) {
+        if let Token::Var(name) = token {
+            if !name.is_empty() {
+                out.insert(name);
+            }
+        }
+    }
+}
+
+/// Numeric literal values observed for one variable: `$name = <n>` assignments
+/// (in `[Constants]`, `[Key*]` option lists, `[Present]`, ...) and
+/// `$name == <n>` / `$name != <n>` comparisons in `if` conditions. Values are
+/// normalized (`1.0` → `1`) and sorted, so the same constant written two ways
+/// collapses to one option.
+pub fn candidate_values(lines: &[IniLine], name: &str) -> BTreeSet<String> {
+    let mut values = BTreeSet::new();
+    for section in parser::sections(lines) {
+        for index in section.header + 1..section.end {
+            let text = strip_comment(&lines[index].text);
+            if text.is_empty() {
+                continue;
+            }
+            let (word, rest) = split_word(text);
+            match word.to_ascii_lowercase().as_str() {
+                "if" | "elif" => collect_compared_values(rest, name, &mut values),
+                "else" => {
+                    let condition = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+                    if let Some(condition) = condition.strip_prefix("if") {
+                        collect_compared_values(condition, name, &mut values);
+                    }
+                }
+                _ => {
+                    let Some((lhs, value)) = split_assignment(text) else {
+                        continue;
+                    };
+                    let lhs = lhs.trim();
+                    // `[Constants]` writes `global persist $var = n`; every
+                    // other section writes the bare `$var = n`.
+                    if !lhs.contains('$') {
+                        continue;
+                    }
+                    let variable = lhs
+                        .rsplit('$')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if variable == name {
+                        if let Some(number) = normalize_number(value) {
+                            values.insert(number);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    values
+}
+
+fn collect_compared_values(expr: &str, name: &str, out: &mut BTreeSet<String>) {
+    let tokens = tokenize(expr);
+    for window in tokens.windows(3) {
+        if let [Token::Var(variable), Token::Op(op), Token::Number(number)] = window {
+            if variable == name && (op == "==" || op == "!=") {
+                out.insert(format_number(*number));
+            }
+        }
+    }
+}
+
+/// `1.0` / `"1"` → `Some("1")`; anything non-numeric → `None`.
+fn normalize_number(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    trimmed.parse::<f64>().ok().map(format_number)
+}
+
+/// Normalize a numeric literal (`1.0` → `1`); `None` when it is not a number.
+/// Exposed so the preview can test whether a toggle's live value is discrete.
+pub fn numeric_literal(value: &str) -> Option<String> {
+    normalize_number(value)
+}
+
+fn format_number(number: f64) -> String {
+    if number.fract() == 0.0 && number.abs() < 1e15 {
+        format!("{}", number as i64)
+    } else {
+        number.to_string()
+    }
+}
+
+/// Canonical fingerprint of everything a toggle can change in a harvest: which
+/// resources are bound (active or excluded) and the draw ranges the game
+/// submits, including the colour map of each range. Two toggle states with the
+/// same fingerprint render the same model, so comparing fingerprints tells a
+/// real part-visibility toggle from a variable nothing on screen depends on.
+pub fn harvest_signature(harvest: &Harvest) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(
+        harvest.active.len() + harvest.excluded.len() + harvest.draws.len(),
+    );
+    for name in &harvest.active {
+        out.push(format!("a:{name}"));
+    }
+    for name in &harvest.excluded {
+        out.push(format!("x:{name}"));
+    }
+    for (index, ranges) in &harvest.draws {
+        for range in ranges {
+            out.push(format!(
+                "d:{index}:{}:{}:{}",
+                range.count,
+                range.start,
+                range.texture.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -1452,6 +1606,91 @@ mod tests {
             start,
             texture: None,
         }
+    }
+
+    #[test]
+    fn collects_variables_used_in_conditions() {
+        let ini = lines(
+            "[CommandListBody]\r\n\
+             if $swapkey == 1\r\n\
+             \tvb0 = ResourceBodyAlt\r\n\
+             elif $color != 0\r\n\
+             \tvb0 = ResourceBodyTint\r\n\
+             endif\r\n\
+             [CommandListHair]\r\n\
+             else if $hair == 2\r\n\
+             \tvb0 = ResourceHairAlt\r\n\
+             endif\r\n",
+        );
+
+        let names = condition_variables(&ini);
+        assert!(names.contains("swapkey"));
+        assert!(names.contains("color"));
+        assert!(names.contains("hair"));
+        // `ResourceBodyAlt` is a binding target, not a condition operand.
+        assert!(!names.contains("resourcebodyalt"));
+    }
+
+    #[test]
+    fn collects_numeric_candidate_values_from_assignments_and_comparisons() {
+        let ini = lines(
+            "[Constants]\r\n\
+             global persist $swapkey = 0\r\n\
+             global $mode = 2.0\r\n\
+             [KeyToggle]\r\n\
+             key = VK_1\r\n\
+             type = toggle\r\n\
+             $swapkey = 1\r\n\
+             $swapkey = 2\r\n\
+             $name = \"hair\"\r\n\
+             [TextureOverrideBody]\r\n\
+             if $swapkey == 3\r\n\
+             \tvb0 = ResourceBodyPos3\r\n\
+             endif\r\n",
+        );
+
+        assert_eq!(
+            candidate_values(&ini, "swapkey"),
+            ["0", "1", "2", "3"].iter().map(|v| v.to_string()).collect()
+        );
+        // Fractional and quoted values normalize; only numbers count.
+        assert_eq!(
+            candidate_values(&ini, "mode"),
+            ["2".to_string()].into_iter().collect()
+        );
+        assert!(candidate_values(&ini, "name").is_empty());
+    }
+
+    #[test]
+    fn harvest_signature_tracks_which_variant_is_drawn() {
+        let ini = lines(
+            "[TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             if $swapkey == 0\r\n\
+             \tvb0 = ResourceBodyBase\r\n\
+             \tib = ResourceBodyBaseIB\r\n\
+             \tdrawindexed = 30, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceBodyAlt\r\n\
+             \tib = ResourceBodyAltIB\r\n\
+             \tdrawindexed = 60, 0, 0\r\n\
+             endif\r\n",
+        );
+
+        let base = harvest(&ini, &state(&[("swapkey", "0")]));
+        let alt = harvest(&ini, &state(&[("swapkey", "1")]));
+        assert_ne!(harvest_signature(&base), harvest_signature(&alt));
+
+        // A variable nothing on screen depends on leaves the fingerprint alone.
+        let other = harvest(&ini, &state(&[("swapkey", "0"), ("unused", "1")]));
+        assert_eq!(harvest_signature(&base), harvest_signature(&other));
+    }
+
+    #[test]
+    fn set_overrides_any_existing_value() {
+        let mut state = state(&[("swapkey", "0")]);
+        state.set("SwapKey", "2");
+        assert_eq!(state.value("swapkey"), Some("2"));
     }
 
     #[test]

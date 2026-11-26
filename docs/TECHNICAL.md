@@ -337,6 +337,18 @@ archive.
 - Viewer: embedded in the mod detail panel behind an **Image / 3D** tab, with
   orbit / zoom / pan, ambient + hemisphere + key/fill lights, wireframe toggle,
   per-component visibility and automatic camera framing from the mesh bounds.
+- **Toggle controls**: the viewer lists the mod's `$variable` toggles that can
+  change the rendered mesh and lets you switch them (e.g. show/hide a part)
+  without editing the INI. A variable is offered only when it is used in an
+  `if` / `elif` / `else if` condition, has at least two known numeric values
+  (from `$var = n` assignments and `$var == n` comparisons; a lone `0`/`1` is
+  completed to the boolean pair), and at least one alternative value changes the
+  harvest fingerprint (active/excluded resources and the `drawindexed` ranges
+  with their colour maps). Variables that gate nothing on screen are never
+  shown. Overrides are applied before `[Present]` replay (so a selector
+  propagates to its derived guards) and again after it (so a direct override of
+  a derived guard wins); only names the mod gates on are accepted. Each change
+  rebuilds the preview, keeping the last mesh visible until the new one lands.
 - The mesh is built only when the 3D tab is opened. Loading and failure states
   are shown in place with a retry button; warnings (missing UVs, inferred
   strides, undecodable textures) are listed separately instead of failing the
@@ -438,7 +450,7 @@ IPC commands:
 | `save_mod_ini_raw`   | Raw save endpoint, not exposed in the UI              |
 | `update_ini_setting` | Change/insert one setting, losslessly (hotkey saves)   |
 | `scan_hotkey_conflicts` | Bindings from all enabled mods that overlap        |
-| `load_mod_preview`   | Buffers + textures for one mod, as base64 meshes      |
+| `load_mod_preview`   | Buffers + textures for one mod; accepts toggle overrides |
 
 ## Thumbnail access (asset protocol)
 

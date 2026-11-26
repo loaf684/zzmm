@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,7 @@ use crate::error::{AppError, AppResult};
 use crate::ini_parser::commands::collect_ini_files;
 use crate::ini_parser::{parser, text};
 use crate::mesh_loader::decode;
-use crate::mesh_loader::model::{MeshPart, MeshPreview};
+use crate::mesh_loader::model::{MeshPart, MeshPreview, PreviewToggle, PreviewToggleValue};
 use crate::mesh_loader::resources::{self, IniResource};
 use crate::mesh_loader::variants::{self, Harvest, ToggleState};
 use crate::mesh_loader::{encode_f32, encode_u32};
@@ -51,15 +52,24 @@ fn mods_dir(state: &AppState) -> AppResult<PathBuf> {
 pub async fn load_mod_preview(
     state: State<'_, AppState>,
     folder_name: String,
+    toggles: Option<Vec<PreviewToggleValue>>,
 ) -> AppResult<MeshPreview> {
     let mods = mods_dir(&state)?;
 
-    tauri::async_runtime::spawn_blocking(move || build_preview(&mods, &folder_name))
+    tauri::async_runtime::spawn_blocking(move || build_preview(&mods, &folder_name, toggles))
         .await
         .map_err(|error| AppError::Task(error.to_string()))?
 }
 
-fn build_preview(mods: &Path, folder_name: &str) -> AppResult<MeshPreview> {
+/// A parsed INI: its path relative to the mod root, its absolute path, and the
+/// lines that feed both the resource scan and the toggle harvest.
+type ParsedIni = (String, PathBuf, Vec<parser::IniLine>);
+
+fn build_preview(
+    mods: &Path,
+    folder_name: &str,
+    overrides: Option<Vec<PreviewToggleValue>>,
+) -> AppResult<MeshPreview> {
     let root = actions::mod_dir(mods, folder_name)?;
     let meta = metadata::read(&root);
     let (_, base_name) = scanner::split_disabled(folder_name);
@@ -76,7 +86,7 @@ fn build_preview(mods: &Path, folder_name: &str) -> AppResult<MeshPreview> {
 
     // Read each INI once: resource sections and the `if`/`endif` command lists
     // that choose between variants come from the same lines.
-    let mut parsed: Vec<(String, PathBuf, Vec<parser::IniLine>)> = Vec::new();
+    let mut parsed: Vec<ParsedIni> = Vec::new();
     for (relative, path, _size) in collect_ini_files(&root)
         .into_iter()
         // `DISABLED_*` INIs are the manager's own backups: reading them would
@@ -126,11 +136,25 @@ fn build_preview(mods: &Path, folder_name: &str) -> AppResult<MeshPreview> {
     toggle_state.set_if_absent("draw_type", "1");
     toggle_state.set_if_absent("active", "1");
 
+    // The viewer's explicit toggle choices. Only variables the mod actually
+    // gates a binding on are accepted, so a stale control cannot perturb the
+    // preview. Applied once before `[Present]` (so a selector override
+    // propagates to its derived guards) and again after it (so an override of a
+    // derived guard itself wins).
+    let gate_variables: BTreeSet<String> = parsed
+        .iter()
+        .flat_map(|(_, _, lines)| variants::condition_variables(lines))
+        .collect();
+    let overrides = overrides.unwrap_or_default();
+    apply_overrides(&mut toggle_state, &overrides, &gate_variables);
+
     // `[Present]` derives the draw toggles from the user's menu selection each
     // frame; replay it so the preview draws the outfit the game would.
     for (_, _, lines) in &parsed {
         variants::apply_present_assignments(lines, &mut toggle_state);
     }
+
+    apply_overrides(&mut toggle_state, &overrides, &gate_variables);
 
     let mut harvest = Harvest::default();
 
@@ -648,6 +672,8 @@ fn build_preview(mods: &Path, folder_name: &str) -> AppResult<MeshPreview> {
         }));
     }
 
+    let toggles = supported_toggles(&parsed, &toggle_state, &harvest);
+
     Ok(MeshPreview {
         mod_folder: folder_name.to_string(),
         mod_name,
@@ -656,7 +682,124 @@ fn build_preview(mods: &Path, folder_name: &str) -> AppResult<MeshPreview> {
         warnings,
         used_default_layout,
         toggles_applied: hidden_parts > 0 || culled_tris > 0 || saved.from_user_config,
+        toggles,
     })
+}
+
+/// Apply the viewer's toggle overrides, ignoring names the mod never gates on.
+fn apply_overrides(
+    state: &mut ToggleState,
+    overrides: &[PreviewToggleValue],
+    allowed: &BTreeSet<String>,
+) {
+    for entry in overrides {
+        let name = entry
+            .name
+            .trim()
+            .trim_start_matches('$')
+            .to_ascii_lowercase();
+        if name.is_empty() || !allowed.contains(&name) {
+            continue;
+        }
+        state.set(&name, entry.value.trim());
+    }
+}
+
+/// Candidate toggle variables and the numeric values the INI gives them,
+/// merged across every INI of the mod.
+fn toggle_candidates(
+    parsed: &[ParsedIni],
+    state: &ToggleState,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (_, _, lines) in parsed {
+        for name in variants::condition_variables(lines) {
+            let values = candidates.entry(name.clone()).or_default();
+            values.extend(variants::candidate_values(lines, &name));
+        }
+    }
+    for (name, values) in &mut candidates {
+        if let Some(current) = state.value(name).and_then(variants::numeric_literal) {
+            values.insert(current);
+        }
+        // 3DMigoto's boolean idiom writes only one branch (`if $x == 0 ... else
+        // ...`), so a lone `0` or `1` is completed to the pair. A selector that
+        // lists several values keeps exactly the listed domain.
+        if values.contains("0") && !values.contains("1") {
+            values.insert("1".to_string());
+        }
+        if values.contains("1") && !values.contains("0") {
+            values.insert("0".to_string());
+        }
+    }
+    candidates
+}
+
+fn harvest_all(parsed: &[ParsedIni], state: &ToggleState) -> Harvest {
+    let mut merged = Harvest::default();
+    for (_, _, lines) in parsed {
+        merged.absorb(variants::harvest(lines, state));
+    }
+    merged
+}
+
+/// Variables whose value actually changes what the preview draws.
+///
+/// A candidate is a `$variable` used in an `if` / `elif` / `else if` condition
+/// with at least two known numeric values. It is exposed only when at least one
+/// alternative value produces a different harvest fingerprint than the state
+/// the model is rendered with, so a control appears exactly when it changes the
+/// mesh, its parts, or the colour map/draw ranges the game submits. Variables
+/// that gate nothing on screen are never returned.
+fn supported_toggles(
+    parsed: &[ParsedIni],
+    state: &ToggleState,
+    harvest: &Harvest,
+) -> Vec<PreviewToggle> {
+    let baseline = variants::harvest_signature(harvest);
+    let mut toggles = Vec::new();
+
+    for (name, options) in toggle_candidates(parsed, state) {
+        if options.len() < 2 {
+            continue;
+        }
+        // Only a variable currently in a numeric state can be shown as a
+        // discrete control; a text setting has no meaningful option list.
+        let Some(current) = state.value(&name).and_then(variants::numeric_literal) else {
+            continue;
+        };
+
+        let affects = options
+            .iter()
+            .filter(|option| **option != current)
+            .any(|option| {
+                let mut probe = state.clone();
+                probe.set(&name, option);
+                variants::harvest_signature(&harvest_all(parsed, &probe)) != baseline
+            });
+        if !affects {
+            continue;
+        }
+
+        toggles.push(PreviewToggle {
+            label: toggle_label(&name),
+            name,
+            value: current,
+            options: options.into_iter().collect(),
+        });
+    }
+
+    toggles
+}
+
+/// `show_hat` → `Show hat`, `swapkey` → `Swapkey`.
+fn toggle_label(name: &str) -> String {
+    let cleaned = name.trim_start_matches('$').replace('_', " ");
+    let mut chars = cleaned.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 fn part_label(resource: &IniResource) -> String {
@@ -1682,6 +1825,208 @@ fn read_limited(path: &Path) -> AppResult<Vec<u8>> {
 #[cfg(test)]
 mod texture_tests {
     use super::*;
+
+    fn parsed_ini(text: &str) -> ParsedIni {
+        (
+            "body.ini".to_string(),
+            PathBuf::from("body.ini"),
+            parser::split_lines(text),
+        )
+    }
+
+    /// State seeded from `[Constants]` exactly as `build_preview` does.
+    fn base_state(parsed: &[ParsedIni]) -> ToggleState {
+        let mut state = ToggleState::default();
+        for (_, _, lines) in parsed {
+            variants::collect_defaults(lines, &mut state);
+        }
+        state
+    }
+
+    #[test]
+    fn exposes_only_toggles_that_change_the_model() {
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $hide_hat = 0\r\n\
+             global persist $unused = 0\r\n\
+             [TextureOverrideHat]\r\n\
+             if $hide_hat == 0\r\n\
+             \tvb0 = ResourceHatPosition\r\n\
+             \tib = ResourceHatIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceHatHidden\r\n\
+             \tib = ResourceHatHiddenIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             endif\r\n\
+             if $unused == 1\r\n\
+             \t; the branch has no binding, so the toggle changes nothing\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert_eq!(toggles.len(), 1, "{toggles:?}");
+        let toggle = &toggles[0];
+        assert_eq!(toggle.name, "hide_hat");
+        assert_eq!(toggle.label, "Hide hat");
+        assert_eq!(toggle.value, "0");
+        assert_eq!(toggle.options, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn an_override_flips_the_variant_the_preview_draws() {
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $hide_hat = 0\r\n\
+             [TextureOverrideHat]\r\n\
+             if $hide_hat == 0\r\n\
+             \tvb0 = ResourceHatOn\r\n\
+             else\r\n\
+             \tvb0 = ResourceHatOff\r\n\
+             endif\r\n",
+        )];
+        let mut state = base_state(&parsed);
+        let gate: BTreeSet<String> = ["hide_hat".to_string()].into_iter().collect();
+
+        apply_overrides(
+            &mut state,
+            &[PreviewToggleValue {
+                name: "Hide_Hat".to_string(),
+                value: "1".to_string(),
+            }],
+            &gate,
+        );
+        assert_eq!(state.value("hide_hat"), Some("1"));
+
+        // A name the mod does not gate on is ignored instead of mutating state.
+        apply_overrides(
+            &mut state,
+            &[PreviewToggleValue {
+                name: "draw_type".to_string(),
+                value: "0".to_string(),
+            }],
+            &gate,
+        );
+        assert_eq!(state.value("draw_type"), None);
+
+        let harvest = harvest_all(&parsed, &state);
+        assert!(harvest.active.contains("resourcehatoff"));
+        assert!(harvest.hides("ResourceHatOn"));
+    }
+
+    #[test]
+    fn completed_boolean_pair_makes_a_single_branch_toggle_exposed() {
+        // Only `0` is written: the `else` branch is the implicit `1`.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $show_weapon = 0\r\n\
+             [TextureOverrideWeapon]\r\n\
+             if $show_weapon == 0\r\n\
+             \tvb0 = ResourceWeaponHidden\r\n\
+             else\r\n\
+             \tvb0 = ResourceWeaponShown\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert_eq!(toggles.len(), 1);
+        assert_eq!(toggles[0].options, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn build_preview_honours_a_toggle_override() {
+        let mods = std::env::temp_dir().join(format!(
+            "zzmm-toggle-preview-{}",
+            std::process::id()
+        ));
+        let root = mods.join("ToggleWeaponMod");
+        let _ = std::fs::remove_dir_all(&mods);
+        std::fs::create_dir_all(&root).expect("temp mod dir");
+
+        let vertex_buffer = |vertices: usize| {
+            let mut bytes = Vec::with_capacity(vertices * 40);
+            for index in 0..vertices {
+                let base = index as f32 * 0.1;
+                for value in [base, 0.0, base] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes.extend_from_slice(&[0u8; 28]);
+            }
+            bytes
+        };
+        let index_buffer = |indices: &[u16]| -> Vec<u8> {
+            indices.iter().flat_map(|index| index.to_le_bytes()).collect()
+        };
+
+        std::fs::write(root.join("WeaponOffPosition.buf"), vertex_buffer(4)).expect("off vb");
+        std::fs::write(root.join("WeaponOnPosition.buf"), vertex_buffer(8)).expect("on vb");
+        std::fs::write(root.join("WeaponOff.ib"), index_buffer(&[0, 1, 2, 1, 2, 3]))
+            .expect("off ib");
+        std::fs::write(root.join("WeaponOn.ib"), index_buffer(&[0, 1, 2, 3, 4, 5]))
+            .expect("on ib");
+        std::fs::write(
+            root.join("weapon.ini"),
+            "[Constants]\r\n\
+             global persist $show_weapon = 0\r\n\
+             \r\n\
+             [ResourceWeaponOffPosition]\r\n\
+             filename = WeaponOffPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceWeaponOnPosition]\r\n\
+             filename = WeaponOnPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceWeaponOffIB]\r\n\
+             filename = WeaponOff.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [ResourceWeaponOnIB]\r\n\
+             filename = WeaponOn.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideWeapon]\r\n\
+             hash = abc\r\n\
+             if $show_weapon == 0\r\n\
+             \tvb0 = ResourceWeaponOffPosition\r\n\
+             \tib = ResourceWeaponOffIB\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceWeaponOnPosition\r\n\
+             \tib = ResourceWeaponOnIB\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             endif\r\n",
+        )
+        .expect("ini");
+
+        let base = build_preview(&mods, "ToggleWeaponMod", None).expect("base preview");
+        assert_eq!(base.toggles.len(), 1, "{:?}", base.toggles);
+        assert_eq!(base.toggles[0].name, "show_weapon");
+        assert_eq!(base.toggles[0].value, "0");
+        assert_eq!(base.parts.len(), 1);
+        assert_eq!(base.parts[0].name, "WeaponOff");
+        assert_eq!(base.parts[0].vertex_count, 4);
+
+        let toggled = build_preview(
+            &mods,
+            "ToggleWeaponMod",
+            Some(vec![PreviewToggleValue {
+                name: "Show_Weapon".to_string(),
+                value: "1".to_string(),
+            }]),
+        )
+        .expect("override preview");
+        assert_eq!(toggled.parts.len(), 1);
+        assert_eq!(toggled.parts[0].name, "WeaponOn");
+        assert_eq!(toggled.parts[0].vertex_count, 8);
+        assert_eq!(toggled.toggles[0].value, "1");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
 
     fn texture(section: &str, filename: &str) -> IniResource {
         IniResource {

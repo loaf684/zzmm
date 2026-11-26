@@ -41,7 +41,7 @@ ZZMM keeps a Zenless Zone Zero mod library organized: it scans your Mods folder,
 - **GameBanana** — browse, search, filter and sort ZZZ mods, open a mod page, and install without leaving the app.
 - **Updates** — compare stored file IDs against GameBanana; updates install beside the old folder and disable it instead of deleting.
 - **Archives** — drop `.zip` / `.7z` / `.rar` anywhere; wrapper folders and multi-mod packs are detected, and existing folders are never overwritten.
-- **3D preview** — render a mod's mesh and decoded DDS textures from its INI, with per-part visibility and wireframe controls (bind pose).
+- **3D preview** — render a mod's mesh and decoded DDS textures from its INI, with per-part visibility, wireframe, and controls for the mod's part/visibility toggles (bind pose).
 - **Hotkeys** — view and rebind hotkeys inline, detect conflicts across enabled mods, and create a one-time `.ini.bak` on first save.
 
 ## Requirements
