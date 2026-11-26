@@ -10,17 +10,26 @@ pub struct IniResource {
     pub stride: Option<usize>,
     pub format: Option<String>,
     /// The INI file that declared this resource (or the folder a scanned file
-    /// was found in). Ranking and texture-scope comparisons read this value
-    /// exactly as they always have, so it must keep the caller's spelling.
+    /// was found in), exactly as the caller passed it. Kept for provenance and
+    /// duplicate checks; folder semantics come from [`IniResource::scope_dir`].
     pub base_dir: Option<PathBuf>,
     /// The folder a `filename` is resolved against: the parent of the declaring
     /// INI, or the folder a scanned file was found in. 3DMigoto resolves a
     /// relative `filename` against the folder of the declaring INI, which is
-    /// why resolution uses this field and not `base_dir`.
+    /// why resolution and every folder-scoped decision (variant ranking, the
+    /// "declared by the mod-root INI" tiebreak, and texture scopes) use this
+    /// field and not `base_dir`.
     pub resolve_dir: Option<PathBuf>,
 }
 
 impl IniResource {
+    /// Folder this resource belongs to for ranking and scope decisions: the
+    /// declaring INI's folder (or the scanned file's folder), falling back to
+    /// the raw `base_dir` for resources built without one.
+    pub fn scope_dir(&self) -> Option<&Path> {
+        self.resolve_dir.as_deref().or(self.base_dir.as_deref())
+    }
+
     pub fn file_stem(&self) -> String {
         let name = self.filename.as_deref().unwrap_or_default();
         let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
@@ -178,9 +187,9 @@ pub fn cores_match(a: &str, b: &str) -> bool {
 /// Collect the resource files of an already-decoded INI, so callers that also
 /// need the command lines (toggle evaluation) only read the file once.
 ///
-/// `base_dir` is the INI file as the caller knows it. Resolution uses its
-/// parent (`resolve_dir`); `base_dir` itself keeps that caller spelling because
-/// ranking and texture-scope comparisons read it.
+/// `base_dir` is the INI file as the caller knows it. Resolution and
+/// folder-scoped decisions use its parent (`resolve_dir`); `base_dir` itself
+/// keeps that caller spelling for provenance and duplicate checks.
 pub fn scan_lines(lines: &[IniLine], base_dir: Option<&Path>) -> ResourceScan {
     let mut scan = ResourceScan::default();
     let base_dir = base_dir.map(Path::to_path_buf);
@@ -368,6 +377,27 @@ mod tests {
             resource.resolve_dir.as_deref(),
             Some(Path::new("/mods/Mod/body"))
         );
+    }
+
+    #[test]
+    fn scope_dir_prefers_the_resolving_folder_and_falls_back() {
+        // Folder-scoped decisions read `scope_dir`: the folder a `filename`
+        // resolves against when the resource has one, otherwise the raw
+        // `base_dir` a hand-built resource carries.
+        let declaring_ini = Path::new("/mods/Mod/body/body.ini");
+        let folder = Path::new("/mods/Mod/body");
+        let resource = IniResource {
+            base_dir: Some(declaring_ini.to_path_buf()),
+            resolve_dir: Some(folder.to_path_buf()),
+            ..IniResource::default()
+        };
+        assert_eq!(resource.scope_dir(), Some(folder));
+
+        let legacy = IniResource {
+            base_dir: Some(folder.to_path_buf()),
+            ..IniResource::default()
+        };
+        assert_eq!(legacy.scope_dir(), Some(folder));
     }
 
     #[test]
