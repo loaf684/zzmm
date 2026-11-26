@@ -33,4 +33,18 @@ export interface MeshPreview {
   usedDefaultLayout: boolean;
   /** True when alternative variants were hidden from the saved toggle state. */
   togglesApplied: boolean;
+  /** Mod toggles the viewer may change; only ones proven to alter the mesh. */
+  toggles: PreviewToggle[];
+}
+
+/** One `$variable` that gates a binding, with the values the INI gives it. */
+export interface PreviewToggle {
+  /** Lower-cased variable name without the `$`. */
+  name: string;
+  /** Display label derived from the variable name. */
+  label: string;
+  /** Value the preview is currently rendered with. */
+  value: string;
+  /** Known numeric values, sorted; always at least two entries. */
+  options: string[];
 }

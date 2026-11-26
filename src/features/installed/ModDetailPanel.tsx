@@ -100,8 +100,11 @@ export function ModDetailPanel({
   const reloadPreview = usePreviewStore((state) => state.reload);
   const hiddenParts = usePreviewStore((state) => state.hiddenParts);
   const wireframe = usePreviewStore((state) => state.wireframe);
+  const toggleValues = usePreviewStore((state) => state.toggleValues);
   const togglePart = usePreviewStore((state) => state.togglePart);
   const setWireframe = usePreviewStore((state) => state.setWireframe);
+  const setToggle = usePreviewStore((state) => state.setToggle);
+  const resetToggles = usePreviewStore((state) => state.resetToggles);
 
   const [activeImage, setActiveImage] = useState(0);
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
@@ -576,6 +579,66 @@ export function ModDetailPanel({
                     )}
                   </button>
                 ))}
+              </div>
+            ) : null}
+
+            {viewerMode === "3d" && previewForMod && previewFailure ? (
+              <p className="border-b border-ink-800/80 px-6 py-1.5 text-[10px] text-red-400">
+                {previewFailure}
+              </p>
+            ) : null}
+
+            {viewerMode === "3d" &&
+            previewForMod &&
+            previewForMod.toggles.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-ink-800/80 px-6 py-2.5">
+                {previewForMod.toggles.map((toggle) => {
+                  const selected = toggleValues[toggle.name] ?? toggle.value;
+                  const binary =
+                    toggle.options.length === 2 &&
+                    toggle.options[0] === "0" &&
+                    toggle.options[1] === "1";
+                  return (
+                    <div
+                      key={toggle.name}
+                      className="flex items-center gap-1.5"
+                      title={`$${toggle.name}`}
+                    >
+                      <span className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">
+                        {toggle.label}
+                      </span>
+                      <div className="inline-flex rounded-full border border-ink-700 bg-ink-950/40 p-0.5">
+                        {toggle.options.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            onClick={() => void setToggle(toggle.name, option)}
+                            aria-pressed={selected === option}
+                            aria-label={`${toggle.label}: ${option}`}
+                            className={cn(
+                              "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+                              selected === option
+                                ? "bg-acid-400/15 text-acid-300"
+                                : "text-zinc-500 hover:text-zinc-200",
+                            )}
+                          >
+                            {binary ? (option === "1" ? "On" : "Off") : option}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {Object.keys(toggleValues).length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => void resetToggles()}
+                    className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-500 transition-colors hover:text-zinc-200"
+                    title="Return to the in-game toggle state"
+                  >
+                    Reset
+                  </button>
+                ) : null}
               </div>
             ) : null}
 
