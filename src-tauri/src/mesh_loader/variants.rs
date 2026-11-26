@@ -1512,8 +1512,12 @@ pub fn candidate_values(lines: &[IniLine], name: &str) -> BTreeSet<String> {
                         .trim()
                         .to_ascii_lowercase();
                     if variable == name {
-                        if let Some(number) = normalize_number(value) {
-                            values.insert(number);
+                        // `[Key*]` option lists write `$var = 0, 1, 2`; a
+                        // single assignment writes just the one value.
+                        for part in value.split(',') {
+                            if let Some(number) = normalize_number(part) {
+                                values.insert(number);
+                            }
                         }
                     }
                 }
@@ -1554,20 +1558,38 @@ fn format_number(number: f64) -> String {
     }
 }
 
-/// Canonical fingerprint of everything a toggle can change in a harvest: which
-/// resources are bound (active or excluded) and the draw ranges the game
-/// submits, including the colour map of each range. Two toggle states with the
-/// same fingerprint render the same model, so comparing fingerprints tells a
-/// real part-visibility toggle from a variable nothing on screen depends on.
+/// Canonical fingerprint of everything a toggle can change about the rendered
+/// model: which renderable resources are bound on an active path, the colour
+/// map resolved for each part and index buffer, and the draw ranges the game
+/// submits (with the colour map of each range).
+///
+/// Data maps (normal / light / specular / mask / glow / ...) and 1×1 null
+/// placeholders are deliberately excluded: the viewer never renders them and
+/// the loader never uses them as a colour source, so a toggle that only
+/// rebinds one of those slots cannot change the preview and must not earn a
+/// control. Two toggle states with the same fingerprint render the same model.
 pub fn harvest_signature(harvest: &Harvest) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(
-        harvest.active.len() + harvest.excluded.len() + harvest.draws.len(),
+        harvest.active.len() + harvest.textures.len() + harvest.index_texture.len() + harvest.draws.len(),
     );
+
     for name in &harvest.active {
+        if looks_like_data_texture(name) || looks_like_null_texture(name) {
+            continue;
+        }
         out.push(format!("a:{name}"));
     }
-    for name in &harvest.excluded {
-        out.push(format!("x:{name}"));
+    for (position, texture) in &harvest.textures {
+        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+            continue;
+        }
+        out.push(format!("t:{position}:{texture}"));
+    }
+    for (index, texture) in &harvest.index_texture {
+        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+            continue;
+        }
+        out.push(format!("i:{index}:{texture}"));
     }
     for (index, ranges) in &harvest.draws {
         for range in ranges {
@@ -1579,6 +1601,7 @@ pub fn harvest_signature(harvest: &Harvest) -> Vec<String> {
             ));
         }
     }
+
     out.sort();
     out.dedup();
     out
@@ -1684,6 +1707,58 @@ mod tests {
         // A variable nothing on screen depends on leaves the fingerprint alone.
         let other = harvest(&ini, &state(&[("swapkey", "0"), ("unused", "1")]));
         assert_eq!(harvest_signature(&base), harvest_signature(&other));
+    }
+
+    #[test]
+    fn collects_comma_separated_option_lists() {
+        let ini = lines(
+            "[KeyCycle]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $swapkey = 0, 1, 2\r\n",
+        );
+
+        assert_eq!(
+            candidate_values(&ini, "swapkey"),
+            ["0", "1", "2"].iter().map(|v| v.to_string()).collect()
+        );
+    }
+
+    #[test]
+    fn harvest_signature_ignores_data_map_only_changes() {
+        let ini = lines(
+            "[TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ps-t0 = ResourceBodyDiffuse\r\n\
+             if $glow == 1\r\n\
+             \tps-t9 = ResourceBodyNormalMap\r\n\
+             endif\r\n",
+        );
+
+        let base = harvest(&ini, &state(&[("glow", "0")]));
+        let glow = harvest(&ini, &state(&[("glow", "1")]));
+        // The normal map is bound on an active path but never rendered.
+        assert!(glow.active.contains("resourcebodynormalmap"));
+        assert_eq!(harvest_signature(&base), harvest_signature(&glow));
+    }
+
+    #[test]
+    fn harvest_signature_tracks_a_colour_map_swap() {
+        let ini = lines(
+            "[TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             if $color == 0\r\n\
+             \tps-t0 = ResourceBodyDiffuseA\r\n\
+             else\r\n\
+             \tps-t0 = ResourceBodyDiffuseB\r\n\
+             endif\r\n",
+        );
+
+        let a = harvest(&ini, &state(&[("color", "0")]));
+        let b = harvest(&ini, &state(&[("color", "1")]));
+        assert_ne!(harvest_signature(&a), harvest_signature(&b));
     }
 
     #[test]

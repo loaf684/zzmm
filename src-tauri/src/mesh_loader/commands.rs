@@ -686,7 +686,11 @@ fn build_preview(
     })
 }
 
-/// Apply the viewer's toggle overrides, ignoring names the mod never gates on.
+/// Apply the viewer's toggle overrides.
+///
+/// Two filters keep a stale or malformed control from perturbing the preview:
+/// the name must be a variable the mod actually gates a binding on, and the
+/// value must be a numeric literal (the viewer only offers numeric options).
 fn apply_overrides(
     state: &mut ToggleState,
     overrides: &[PreviewToggleValue],
@@ -701,7 +705,12 @@ fn apply_overrides(
         if name.is_empty() || !allowed.contains(&name) {
             continue;
         }
-        state.set(&name, entry.value.trim());
+        // Normalize (`1.0` → `1`) so an override compares equal to the values
+        // the INI declares.
+        let Some(value) = variants::numeric_literal(&entry.value) else {
+            continue;
+        };
+        state.set(&name, &value);
     }
 }
 
@@ -724,12 +733,13 @@ fn toggle_candidates(
         }
         // 3DMigoto's boolean idiom writes only one branch (`if $x == 0 ... else
         // ...`), so a lone `0` or `1` is completed to the pair. A selector that
-        // lists several values keeps exactly the listed domain.
-        if values.contains("0") && !values.contains("1") {
-            values.insert("1".to_string());
-        }
-        if values.contains("1") && !values.contains("0") {
-            values.insert("0".to_string());
+        // already lists several values keeps exactly its declared domain.
+        if values.len() == 1 {
+            if values.contains("0") {
+                values.insert("1".to_string());
+            } else if values.contains("1") {
+                values.insert("0".to_string());
+            }
         }
     }
     candidates
@@ -743,14 +753,38 @@ fn harvest_all(parsed: &[ParsedIni], state: &ToggleState) -> Harvest {
     merged
 }
 
+/// A copy of the state as `build_preview` leaves it after applying one toggle
+/// override: the override goes on before `[Present]` replay (so a selector
+/// propagates to its derived guards) and again after it (so a direct override
+/// of a derived guard wins). Probing without this replay would miss every
+/// selector whose visible effect is mediated by `[Present]` and hide its
+/// control.
+fn probe_state(
+    state: &ToggleState,
+    parsed: &[ParsedIni],
+    name: &str,
+    value: &str,
+) -> ToggleState {
+    let mut probe = state.clone();
+    probe.set(name, value);
+    for (_, _, lines) in parsed {
+        variants::apply_present_assignments(lines, &mut probe);
+    }
+    probe.set(name, value);
+    probe
+}
+
 /// Variables whose value actually changes what the preview draws.
 ///
 /// A candidate is a `$variable` used in an `if` / `elif` / `else if` condition
 /// with at least two known numeric values. It is exposed only when at least one
 /// alternative value produces a different harvest fingerprint than the state
 /// the model is rendered with, so a control appears exactly when it changes the
-/// mesh, its parts, or the colour map/draw ranges the game submits. Variables
-/// that gate nothing on screen are never returned.
+/// mesh, its parts, the colour map resolved for a part/index buffer, or the draw
+/// ranges the game submits. Data maps (normal/light/glow/...) and null
+/// placeholders are not part of the fingerprint, so a toggle that only rebinds
+/// one of those earns no control. Variables that gate nothing on screen are
+/// never returned.
 fn supported_toggles(
     parsed: &[ParsedIni],
     state: &ToggleState,
@@ -773,8 +807,7 @@ fn supported_toggles(
             .iter()
             .filter(|option| **option != current)
             .any(|option| {
-                let mut probe = state.clone();
-                probe.set(&name, option);
+                let probe = probe_state(state, parsed, &name, option);
                 variants::harvest_signature(&harvest_all(parsed, &probe)) != baseline
             });
         if !affects {
@@ -785,11 +818,22 @@ fn supported_toggles(
             label: toggle_label(&name),
             name,
             value: current,
-            options: options.into_iter().collect(),
+            options: sorted_options(options),
         });
     }
 
     toggles
+}
+
+/// Numeric values in value order (`2` before `10`), falling back to text order
+/// for any non-numeric option.
+fn sorted_options(options: BTreeSet<String>) -> Vec<String> {
+    let mut values: Vec<String> = options.into_iter().collect();
+    values.sort_by(|a, b| match (a.parse::<f64>(), b.parse::<f64>()) {
+        (Ok(a), Ok(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+        _ => a.cmp(b),
+    });
+    values
 }
 
 /// `show_hat` → `Show hat`, `swapkey` → `Swapkey`.
@@ -1911,9 +1955,96 @@ mod texture_tests {
         );
         assert_eq!(state.value("draw_type"), None);
 
+        // A non-numeric value cannot be one of the viewer's numeric options.
+        apply_overrides(
+            &mut state,
+            &[PreviewToggleValue {
+                name: "hide_hat".to_string(),
+                value: "on".to_string(),
+            }],
+            &gate,
+        );
+        assert_eq!(state.value("hide_hat"), Some("1"));
+
         let harvest = harvest_all(&parsed, &state);
         assert!(harvest.active.contains("resourcehatoff"));
         assert!(harvest.hides("ResourceHatOn"));
+    }
+
+    #[test]
+    fn cycle_toggle_keeps_its_constants_default_and_sorts_numerically() {
+        // The exact reproduction from the paired-branch review: a cycle writes
+        // only its on-values, while the [Constants] default is the off state.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $swapkey = 0\r\n\
+             [KeyCycle]\r\n\
+             key = VK_3\r\n\
+             type = cycle\r\n\
+             $swapkey = 2, 10\r\n\
+             [TextureOverrideBody]\r\n\
+             if $swapkey == 2\r\n\
+             \tvb0 = ResourceBody2\r\n\
+             else if $swapkey == 10\r\n\
+             \tvb0 = ResourceBody10\r\n\
+             else\r\n\
+             \tvb0 = ResourceBody0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert_eq!(toggles.len(), 1, "{toggles:?}");
+        let toggle = &toggles[0];
+        assert_eq!(toggle.name, "swapkey");
+        assert_eq!(toggle.value, "0");
+        assert_eq!(
+            toggle.options,
+            vec!["0".to_string(), "2".to_string(), "10".to_string()]
+        );
+        assert!(
+            toggle.options.contains(&toggle.value),
+            "currentValue must be one of options"
+        );
+    }
+
+    #[test]
+    fn present_derived_selector_is_exposed() {
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $outfit = 0\r\n\
+             global persist $outfit_on = 0\r\n\
+             [Present]\r\n\
+             if $outfit == 1\r\n\
+             \t$outfit_on = 1\r\n\
+             else\r\n\
+             \t$outfit_on = 0\r\n\
+             endif\r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             if $outfit_on == 1\r\n\
+             \tvb0 = ResourceOutfit1\r\n\
+             else\r\n\
+             \tvb0 = ResourceOutfit0\r\n\
+             endif\r\n",
+        )];
+        let mut state = base_state(&parsed);
+        // `$outfit_on` is only derived by `[Present]`, exactly as in the build.
+        for (_, _, lines) in &parsed {
+            variants::apply_present_assignments(lines, &mut state);
+        }
+        assert_eq!(state.value("outfit_on"), Some("0"));
+        let harvest = harvest_all(&parsed, &state);
+        assert!(harvest.active.contains("resourceoutfit0"));
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let outfit = toggles
+            .iter()
+            .find(|toggle| toggle.name == "outfit")
+            .expect("Present-mediated selector must be exposed");
+        assert_eq!(outfit.value, "0");
+        assert_eq!(outfit.options, vec!["0".to_string(), "1".to_string()]);
     }
 
     #[test]
