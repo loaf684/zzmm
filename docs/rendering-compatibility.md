@@ -40,9 +40,14 @@ requires a particular folder layout, model format, or material naming scheme.
      line sits in a disabled branch. All-disabled means the part is omitted; only
      a buffer with no `drawindexed` line at all (the game's `auto` draw) falls
      back to the whole index buffer.
-   - The hash group's `handling = skip` is tracked with the hash, so a section
-     that binds an `ib` but submits no draw is omitted when the original draw is
-     suppressed and kept when it is not.
+   - A whole-line commented `; drawindexed` / `# drawindexed` is the mod switching
+     that sub-draw off. It is recorded against the index buffer bound at that
+     point, but the part is only omitted when the section's hash group also sets
+     `handling = skip` and submits no `drawindexed = auto`; otherwise the game
+     still draws the buffer and the preview keeps the whole-buffer fallback.
+   - The hash group's `handling = skip` is tracked with the hash (evaluated
+     against the saved toggle state), so a conditional skip the state does not
+     take leaves the original draw in place.
    - Toggle branches evaluate saved user values first, then `draw_type`/`active`
      system defaults. Only drawn variants are kept.
 4. **Scan the folder (`resources::scan_folder`).** Shader-dump mods keep `.buf`,
@@ -178,21 +183,24 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   names the shortfall instead of hiding the whole mesh.
 - **Skipped draws:** 3DMigoto merges every override that shares a `hash`, and
   `handling = skip` on any of them suppresses the game's original draw for that
-  group. When such a group binds an index buffer but submits no replacement
-  draw, the game draws nothing for it and the preview must omit the part instead
-  of falling back to the whole buffer. `S11Mod` is the case: all four overrides
-  share `hash = e3ee72d9`, `[TextureOverrideS11BodyIB]` sets
-  `handling = skip`, only `BodyA` keeps a live `drawindexed` (clamped to the
-  dump's 69,273 indices), and `BodyB`/`BodyC` are commented out. The game submits
-  BodyA only, so `BodyB` (the hip-height bag, 3,041 triangles) is absent in game;
-  the preview used to paint it back in. `SoukakuCowBikini`'s mask (696 triangles)
-  is hidden the same way. Two shapes keep the whole-buffer fallback: a skipped
-  group that carries `drawindexed = auto` (Nekomata/Astra/Nicole bind their IB
-  beside one) redraws the whole buffer, and a section whose hash is not skipped
-  (`a_rebind_only_index_buffer_still_draws_the_whole_buffer`) still has the
-  game's own draw. A buffer with no `hash` at all always fails open.
-  Conditionally skipped groups follow the saved toggle state: a `handling = skip`
-  inside a branch the state does not take is ignored, so the part is kept.
+  group. A commented-out `drawindexed` (`;` or `#`) is the mod's explicit "this
+  replacement draw is off", and the preview omits that part only when all three
+  hold: the draw line is commented out, the section's hash group sets
+  `handling = skip` for the current toggle state, and the group submits no
+  `drawindexed = auto`. `S11Mod` is the case: all four overrides share
+  `hash = e3ee72d9`, `[TextureOverrideS11BodyIB]` sets `handling = skip`, only
+  `BodyA` keeps a live `drawindexed` (clamped to the dump's 69,273 indices), and
+  `BodyB`/`BodyC` are commented out. The game submits BodyA only, so `BodyB` (the
+  hip-height bag, 3,041 triangles) is absent in game; the preview used to paint
+  it back in. `SoukakuCowBikini`'s mask (696 triangles) is hidden the same way.
+  Everything else keeps the whole-buffer fallback because the game still draws
+  it:
+  - a commented draw in a hash that is not skipped (the game's original draw
+    remains),
+  - a skipped group that carries `drawindexed = auto` (Nekomata/Astra/Nicole
+    bind their IB beside one, redrawing the whole buffer),
+  - a skipped hash with no commented draw at all (fail open),
+  - a buffer with no `hash` at all.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
