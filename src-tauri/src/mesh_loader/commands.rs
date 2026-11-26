@@ -728,20 +728,27 @@ fn apply_overrides(
 /// Candidate toggle variables and the numeric values the INI gives them,
 /// merged across every INI of the mod.
 ///
-/// A variable is a candidate only when a `[Key*]` section binds it: the key
-/// editor's own notion of a user toggle. Internal flags (a `[Constants]`
-/// default, a `[Present]`-derived guard, a condition-only knob) can change the
-/// mesh too, but the user has no in-game control for them, so they must never
-/// appear as a preview control. Values still come from every assignment and
-/// comparison in the mod, so a key's option list can live apart from the
-/// `[Constants]` default it overrides.
+/// A variable is a candidate when the mod's own controls can change it: a
+/// `[Key*]` section binds it (the key editor's notion of a user toggle), or the
+/// mod assigns it from itself (`$jacket = 1 - $jacket`, `$page = $page + 1`),
+/// which is how the in-game slot menu drives its item flags — Sunna's and
+/// Yuzuha's mods have no `[Key*]` binding for those at all. Internal flags (a
+/// `[Constants]` default nobody assigns, a `[Present]`-derived guard, a
+/// condition-only knob) can change the mesh too, but the user has no in-game
+/// control for them, so they must never appear as a preview control. Values
+/// still come from every assignment and comparison in the mod, so a control's
+/// option list can live apart from the `[Constants]` default it overrides.
 fn toggle_candidates(
     parsed: &[ParsedIni],
     state: &ToggleState,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let declared: BTreeSet<String> = parsed
         .iter()
-        .flat_map(|(_, _, lines)| variants::key_toggle_variables(lines))
+        .flat_map(|(_, _, lines)| {
+            variants::key_toggle_variables(lines)
+                .into_iter()
+                .chain(variants::self_toggled_variables(lines))
+        })
         .collect();
 
     let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -805,15 +812,16 @@ fn probe_state(
 /// Variables whose value actually changes what the preview draws.
 ///
 /// A candidate is a `$variable` used in an `if` / `elif` / `else if` condition
-/// with at least two known numeric values *and* declared by a `$name = ...`
-/// assignment inside a `[Key*]` section. Internal/derived flags (a
-/// `[Constants]` default, `[Present]` guards, condition-only knobs) change the
-/// mesh too but are not in-game controls, so they are never offered. Beyond
-/// that gate, a candidate is exposed only when at least one alternative value
-/// produces a different harvest fingerprint than the state the model is
-/// rendered with, so a control appears exactly when it changes the
-/// mesh, its parts, the colour map resolved for a part/index buffer, or the draw
-/// ranges the game submits. Data maps (normal/light/glow/...) and null
+/// with at least two known numeric values *and* changeable from the mod's own
+/// controls: a `$name = ...` assignment inside a `[Key*]` section, or an
+/// assignment that reads the variable it writes (the slot menu's item toggles).
+/// Internal/derived flags (a `[Constants]` default, `[Present]` guards,
+/// condition-only knobs) change the mesh too but are not in-game controls, so
+/// they are never offered. Beyond that gate, a candidate is exposed only when at
+/// least one alternative value produces a different harvest fingerprint than the
+/// state the model is rendered with, so a control appears exactly when it changes
+/// the mesh, its parts, the colour map resolved for a part/index buffer, or the
+/// draw ranges the game submits. Data maps (normal/light/glow/...) and null
 /// placeholders are not part of the fingerprint, so a toggle that only rebinds
 /// one of those earns no control. Variables that gate nothing on screen are
 /// never returned.
@@ -2357,6 +2365,99 @@ mod texture_tests {
     }
 
     #[test]
+    fn a_menu_toggled_item_flag_is_a_control_without_a_key_section() {
+        // Sunna/Yuzuha shape: the slot menu flips the item flags itself
+        // (`$jacket = 1 - $jacket`), so no `[Key*]` section ever binds them,
+        // yet they are exactly what the user toggles in game.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $jacket = 1\r\n\
+             [CommandListClickedSlot]\r\n\
+             $jacket = 1 - $jacket\r\n\
+             [Present]\r\n\
+             run = CommandListClickedSlot\r\n\
+             [TextureOverrideJacket]\r\n\
+             if $jacket == 1\r\n\
+             \tvb0 = ResourceJacketOn\r\n\
+             else\r\n\
+             \tvb0 = ResourceJacketOff\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert_eq!(toggles.len(), 1, "{toggles:?}");
+        let toggle = &toggles[0];
+        assert_eq!(toggle.name, "jacket");
+        assert_eq!(toggle.label, "Jacket");
+        assert_eq!(toggle.value, "1");
+        assert_eq!(toggle.options, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn a_flag_the_mod_derives_itself_is_not_a_control() {
+        // BelleStars shape: the mod writes `$bear` from game state every frame
+        // and never from itself, so the user cannot toggle it in game.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global $bear = 0\r\n\
+             [Present]\r\n\
+             post $bear = 0\r\n\
+             [CommandListSetBear]\r\n\
+             $bear = 1\r\n\
+             [TextureOverrideBear]\r\n\
+             if $bear == 1\r\n\
+             \tvb0 = ResourceBearPosition\r\n\
+             else\r\n\
+             \tvb0 = ResourceBodyPosition\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert!(toggles.is_empty(), "{toggles:?}");
+    }
+
+    #[test]
+    fn a_menu_only_toggle_is_not_a_control() {
+        // The slot menu rebinds `ps-t100` on its own art, without a draw, and
+        // the item flags it flips still have to earn their place: a flag that
+        // only switches menu art must not appear next to a body part toggle.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $oiled = 0\r\n\
+             global persist $jacket = 1\r\n\
+             [CommandListClickedSlot]\r\n\
+             $oiled = 1 - $oiled\r\n\
+             $jacket = 1 - $jacket\r\n\
+             [CommandListSlotItemImage]\r\n\
+             if $oiled == 0\r\n\
+             \tps-t100 = ResourceMenuItem.1\r\n\
+             else\r\n\
+             \tps-t100 = ResourceMenuItem.1Hover\r\n\
+             endif\r\n\
+             [TextureOverrideJacket]\r\n\
+             if $jacket == 1\r\n\
+             \tvb0 = ResourceJacketOn\r\n\
+             \tib = ResourceJacketOnIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             else\r\n\
+             \tvb0 = ResourceJacketOff\r\n\
+             \tib = ResourceJacketOffIB\r\n\
+             \tdrawindexed = 3, 0, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        let names: Vec<&str> = toggles.iter().map(|toggle| toggle.name.as_str()).collect();
+        assert_eq!(names, vec!["jacket"], "{toggles:?}");
+    }
+
+    #[test]
     fn an_override_flips_the_variant_the_preview_draws() {
         let parsed = vec![parsed_ini(
             "[Constants]\r\n\
@@ -3520,3 +3621,4 @@ mod resource_path_tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 }
+

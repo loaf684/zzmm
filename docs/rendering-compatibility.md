@@ -169,6 +169,14 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   replaced by another variant's file.
 - **Toggle state:** alternatives not drawn by the saved state are skipped and
   counted in the preview warnings.
+- **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
+  When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
+  `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
+  user-settable, so the preview offers it. Sunna's, Yuzuha's and Corin's menu
+  mods went from 0 controls to 25, 12 and 17 this way. A flag the mod derives
+  from game state is assigned a literal or another variable's value instead and
+  stays hidden, which is what keeps internal guards (BelleStars' `$bear`) out of
+  the panel even though they change geometry.
 - **Orientation:** positions are rotated from the game's Z-up to the viewer's
   Y-up when the bounding box shows a vertical Z extent, without touching the
   source buffers.

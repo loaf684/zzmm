@@ -1009,6 +1009,28 @@ fn looks_like_null_texture(resource: &str) -> bool {
     resource.to_ascii_lowercase().contains("null")
 }
 
+/// Menu art a mod binds for its own on-screen UI. Rebinding it changes what the
+/// menu looks like, never what the character renders, so it must not make a
+/// menu flag look like a mesh control (the slot menu's `$menu`, `$oiled`,
+/// `$nails` all rebind `ps-t100` art this way).
+fn looks_like_ui_texture(resource: &str) -> bool {
+    [
+        "menuitem",
+        "menubg",
+        "menu.",
+        "renderimage",
+        "credit",
+        "preview",
+        "slotitem",
+        "slotbg",
+        "slider",
+        "cursor",
+        "hover",
+    ]
+    .iter()
+    .any(|marker| resource.to_ascii_lowercase().contains(marker))
+}
+
 fn looks_like_data_texture(resource: &str) -> bool {
     [
         "normal",
@@ -1464,6 +1486,64 @@ pub fn key_toggle_variables(lines: &[IniLine]) -> BTreeSet<String> {
     names
 }
 
+/// Variables a mod's own slot menu drives, which no `[Key*]` section mentions:
+/// an assignment whose right-hand side reads the variable it assigns
+/// (`$jacket = 1 - $jacket`, `$page = $page + 1`). That idiom only makes sense
+/// for a control a user flips; a flag the mod derives from game state is
+/// assigned a literal or another variable's value, so it stays out of the
+/// preview's controls.
+pub fn self_toggled_variables(lines: &[IniLine]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for section in parser::sections(lines) {
+        for index in section.header + 1..section.end {
+            let text = strip_comment(&lines[index].text);
+            let Some((lhs, rhs)) = split_assignment(&text) else {
+                continue;
+            };
+            // `[Constants]` writes `global persist $var = ...` under any number
+            // of leading keywords; the tail after the last `$` is the name.
+            if !lhs.contains('$') {
+                continue;
+            }
+            let variable = lhs
+                .rsplit('$')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if variable.is_empty() {
+                continue;
+            }
+            if reads_variable(rhs, &variable) {
+                names.insert(variable);
+            }
+        }
+    }
+    names
+}
+
+/// True when `expression` reads `$name` as a whole variable rather than as the
+/// prefix of a longer one (`$page` must not match `$pagecount`).
+fn reads_variable(expression: &str, name: &str) -> bool {
+    let lower = expression.to_ascii_lowercase();
+    let needle = format!("${name}");
+    let mut from = 0;
+
+    while let Some(found) = lower[from..].find(&needle) {
+        let after = from + found + needle.len();
+        let is_whole = lower[after..]
+            .chars()
+            .next()
+            .is_none_or(|character| !(character.is_ascii_alphanumeric() || character == '_'));
+        if is_whole {
+            return true;
+        }
+        from = after;
+    }
+
+    false
+}
+
 /// Variable names used as operands inside `if` / `elif` / `else if`
 /// conditions. Only these can gate a binding, so only these can change what
 /// the preview draws.
@@ -1601,31 +1681,43 @@ pub fn harvest_signature(harvest: &Harvest) -> Vec<String> {
         harvest.active.len() + harvest.textures.len() + harvest.index_texture.len() + harvest.draws.len(),
     );
 
+    let hidden = |resource: &str| {
+        looks_like_data_texture(resource)
+            || looks_like_null_texture(resource)
+            || looks_like_ui_texture(resource)
+    };
+
     for name in &harvest.active {
-        if looks_like_data_texture(name) || looks_like_null_texture(name) {
+        if hidden(name) {
             continue;
         }
         out.push(format!("a:{name}"));
     }
     for (position, texture) in &harvest.textures {
-        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+        if hidden(texture) {
             continue;
         }
         out.push(format!("t:{position}:{texture}"));
     }
     for (index, texture) in &harvest.index_texture {
-        if looks_like_data_texture(texture) || looks_like_null_texture(texture) {
+        if hidden(texture) {
             continue;
         }
         out.push(format!("i:{index}:{texture}"));
     }
     for (index, ranges) in &harvest.draws {
         for range in ranges {
+            // The geometry of a draw is always part of the fingerprint; only the
+            // colour map is dropped when it is menu art, so a flag that merely
+            // switches the mod's on-screen menu cannot look like a mesh change.
+            let texture = range
+                .texture
+                .as_deref()
+                .filter(|texture| !hidden(texture))
+                .unwrap_or("");
             out.push(format!(
-                "d:{index}:{}:{}:{}",
-                range.count,
-                range.start,
-                range.texture.as_deref().unwrap_or("")
+                "d:{index}:{}:{}:{texture}",
+                range.count, range.start
             ));
         }
     }
@@ -1738,6 +1830,34 @@ mod tests {
         assert!(declared.contains("hair"));
         // `[Constants]` persistence and a condition-only flag are not controls.
         assert!(!declared.contains("bear"));
+    }
+
+    #[test]
+    fn self_toggled_variables_reads_the_slot_menu_idiom() {
+        let ini = lines(
+            "[Constants]\r\n\
+             global persist $jacket = 1\r\n\
+             global persist $pagecount = 3\r\n\
+             global $bear = 0\r\n\
+             [CommandListClickedSlot]\r\n\
+             $jacket = 1 - $jacket\r\n\
+             $pagecount = $pagecount + 0\r\n\
+             $bear = 1\r\n\
+             [CommandListDimensions]\r\n\
+             $width = $pagecount + 1\r\n\
+             $page = $pagecount + 1\r\n",
+        );
+
+        let driven = self_toggled_variables(&ini);
+        assert!(driven.contains("jacket"));
+        assert!(driven.contains("pagecount"));
+        // Assigned from another variable's value, not from itself.
+        assert!(!driven.contains("width"));
+        // Assigned a literal: a flag the mod derives, not a control.
+        assert!(!driven.contains("bear"));
+        // `$page` must not match the `$pagecount` on the right-hand side: a
+        // name is read whole, never as a prefix of a longer variable.
+        assert!(!driven.contains("page"));
     }
 
     #[test]
