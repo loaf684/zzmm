@@ -226,6 +226,24 @@ function PartOutline({
   return <mesh geometry={geometry} material={material} visible={visible} />;
 }
 
+/**
+ * The parts that carry the model. A stray prop (an untextured cloak, a
+ * bone-parented accessory authored in another orientation) must not decide the
+ * framing or tip the up-axis of the whole character.
+ */
+function framingParts(parts: MeshPart[]): MeshPart[] {
+  if (parts.length <= 1) return parts;
+
+  const largest = parts.reduce(
+    (max, part) => Math.max(max, part.triangleCount),
+    0,
+  );
+  const threshold = Math.max(largest * 0.02, 1);
+  const main = parts.filter((part) => part.triangleCount >= threshold);
+
+  return main.length > 0 ? main : parts;
+}
+
 interface PartMeshProps {
   part: MeshPart;
   visible: boolean;
@@ -326,7 +344,36 @@ interface ModelViewerProps {
   hiddenParts: string[];
   wireframe: boolean;
   outline: boolean;
+  /**
+   * Identity of the mod being shown. Framing (centre, radius, up axis) is
+   * computed once per mod: a toggle rebuild swaps the geometry but must not
+   * move the character or reset the camera.
+   */
+  frameKey: string;
   className?: string;
+}
+
+/** Puts the camera straight in front of the character and keeps it there. */
+function CameraRig({ frameKey, radius }: { frameKey: string; radius: number }) {
+  const camera = useThree((state) => state.camera);
+  const controls = useThree((state) => state.controls) as
+    | { target: THREE.Vector3; update: () => void }
+    | null;
+
+  useEffect(() => {
+    // The group transform centres the model on the origin, so a camera on +Z
+    // looks it in the face instead of from the side.
+    camera.position.set(0, radius * 0.12, radius * 2.4);
+    camera.near = Math.max(radius / 1000, 0.001);
+    camera.far = Math.max(radius * 60, 10);
+    camera.updateProjectionMatrix();
+    controls?.target.set(0, 0, 0);
+    controls?.update();
+    // Only a different mod re-frames; a rebuild for the same mod leaves the
+    // camera, the orbit and the damping state untouched.
+  }, [camera, controls, frameKey, radius]);
+
+  return null;
 }
 
 export function ModelViewer({
@@ -334,31 +381,31 @@ export function ModelViewer({
   hiddenParts,
   wireframe,
   outline,
+  frameKey,
   className,
 }: ModelViewerProps) {
   // Frame the camera and pick the up axis from the parts that carry the model,
   // so a stray prop (an untextured cloak, a bone-parented accessory authored in
   // another orientation) cannot shrink the character or tip it over.
-  const framing = useMemo(() => {
-    if (parts.length <= 1) return parts;
+  //
+  // Keyed on the mod, not on `parts`: switching a toggle re-builds the preview,
+  // and re-framing then would recentre the character and throw away the user's
+  // orbit. The `parts.length > 0` term only lets the first non-empty build
+  // frame a mod whose preview arrived after an empty one.
+  const { bounds, upAxis } = useMemo(() => {
+    const frameParts = framingParts(parts);
+    const framed = boundsOf(frameParts);
 
-    const largest = parts.reduce(
-      (max, part) => Math.max(max, part.triangleCount),
-      0,
-    );
-    const threshold = Math.max(largest * 0.02, 1);
-    const main = parts.filter((part) => part.triangleCount >= threshold);
+    // YZZ/ZZZ position buffers are Z-up, but imported Genshin-style mods keep
+    // the Y-up layout. Pick the axis that is clearly the height (with a margin,
+    // so wide coats and outstretched arms do not flip a normal Z-up model).
+    return {
+      bounds: framed,
+      upAxis: (framed.size.y > framed.size.z * 1.3 ? "y" : "z") as "y" | "z",
+    };
+  }, [frameKey, parts.length > 0]);
 
-    return main.length > 0 ? main : parts;
-  }, [parts]);
-
-  const { center, radius, size } = useMemo(() => boundsOf(framing), [framing]);
-
-  // YZZ/ZZZ position buffers are Z-up, but imported Genshin-style mods keep
-  // the Y-up layout. Pick the axis that is clearly the height (with a margin,
-  // so wide coats and outstretched arms do not flip a normal Z-up model) and
-  // rotate that axis onto Y.
-  const upAxis: "y" | "z" = size.y > size.z * 1.3 ? "y" : "z";
+  const { center, radius } = bounds;
 
   const orientation =
     upAxis === "y"
@@ -375,22 +422,26 @@ export function ModelViewer({
   return (
     <div
       className={cn(
-        "relative h-[560px] w-full border border-ink-700/90 bg-gradient-to-b from-ink-900 to-ink-950",
+        // Studio backdrop: a soft slate pool behind the character falling away
+        // to near-black at the edges. Neutral enough not to tint the textures,
+        // light enough that black hair and dark cloth still read as shapes.
+        "relative h-[560px] w-full border border-ink-700/90 bg-[radial-gradient(120%_90%_at_50%_35%,#39434f_0%,#232b36_45%,#12161d_100%)]",
         className,
       )}
     >
       <Canvas
-        key={`${radius}-${upAxis}`}
         dpr={[1, 2]}
-        gl={{ antialias: true, alpha: false }}
+        // Transparent so the CSS studio gradient behind the canvas shows
+        // through: a flat near-black backdrop made dark clothes and hair read
+        // as one silhouette.
+        gl={{ antialias: true, alpha: true }}
         camera={{
-          position: [radius * 1.7, radius * 0.9, radius * 2.1],
+          position: [0, radius * 0.12, radius * 2.4],
           fov: 38,
           near: Math.max(radius / 1000, 0.001),
           far: Math.max(radius * 60, 10),
         }}
         onCreated={({ gl }) => {
-          gl.setClearColor("#0a0c12", 1);
           gl.outputColorSpace = THREE.SRGBColorSpace;
           gl.toneMapping = THREE.ACESFilmicToneMapping;
           // Texture maps now render at full albedo (no grey tint), so the
@@ -399,7 +450,7 @@ export function ModelViewer({
           gl.toneMappingExposure = 0.72;
         }}
       >
-        <color attach="background" args={["#0a0c12"]} />
+        <CameraRig frameKey={frameKey} radius={radius} />
         <ambientLight intensity={1.05} />
         <hemisphereLight args={["#cfe4ff", "#1a1d26", 1.15]} />
         <directionalLight
