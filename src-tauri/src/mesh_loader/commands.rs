@@ -1501,9 +1501,10 @@ fn load_texture(
     // A mod that binds a diffuse per index buffer is telling us exactly which
     // atlas paints which submesh. `component_core` collapses A/B/C as variants
     // of one component, so a buffer with no binding of its own must not inherit
-    // a sibling's atlas through that core: in game those draws are painted by
-    // the game's own texture (S11's bag, S11BodyB, is exactly this case, and
-    // borrowing painted it with the body sheet).
+    // a sibling's atlas through that core: the preview cannot know what that
+    // draw is painted with in game (the loader's own state decides it, and this
+    // code does not model it), so it renders neutral rather than borrowing -
+    // S11's bag (S11BodyB) used to wear the body sheet that way.
     let mod_binds_per_ib = harvest.is_some_and(|harvest| !harvest.index_texture.is_empty());
     let own_ib_bound = index.is_some_and(|resource| {
         harvest.is_some_and(|harvest| {
@@ -2781,10 +2782,9 @@ drawindexed = 3, 0, 0
     #[test]
     fn a_slice_with_no_binding_does_not_inherit_a_siblings_atlas() {
         // S11 shape: the body IB binds the mod's atlas, the bag IB (a separate
-        // slice, its own match_first_index) binds none because in game that
-        // draw keeps the game's own texture. `component_core` collapses A/B as
-        // variants of one component, so the bag used to be painted with the body
-        // sheet - the bag looked like skin and suit fabric.
+        // slice, its own match_first_index) binds none. `component_core`
+        // collapses A/B as variants of one component, so the bag used to be
+        // painted with the body sheet - it looked like skin and suit fabric.
         let scratch = Scratch::new("Slices");
         scratch.write_text(
             "Slices.ini",
