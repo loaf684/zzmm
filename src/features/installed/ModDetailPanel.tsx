@@ -297,20 +297,36 @@ export function ModDetailPanel({
     try {
       const saved = await api.preview.save(mod.folderName, toggleValues);
       const count = saved.written.length;
-      toast.success(
-        count === 1 ? "Saved 1 toggle to the game" : `Saved ${count} toggles to the game`,
-        `${saved.file}${saved.backup ? ` · backup ${saved.backup}` : ""} — close the game for these to stick: 3DMigoto rewrites this file while it runs.`,
-      );
-      if (saved.missing.length > 0) {
-        toast.error(
-          "Some toggles were not saved",
-          `This mod does not declare ${saved.missing.join(", ")}.`,
+      const caveat =
+        "Close the game for these to stick: 3DMigoto rewrites this file while it runs.";
+      const refused = [
+        saved.missing.length > 0
+          ? `not declared by this mod: ${saved.missing.join(", ")}`
+          : null,
+        saved.ambiguous.length > 0
+          ? `declared in several INIs: ${saved.ambiguous.join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
+      if (count > 0) {
+        toast.success(
+          count === 1 ? "Saved 1 toggle to the game" : `Saved ${count} toggles to the game`,
+          [
+            `${saved.file}${saved.backup ? ` · backup ${saved.backup}` : ""}`,
+            refused ? `Refused: ${refused}` : null,
+            caveat,
+          ]
+            .filter(Boolean)
+            .join(" — "),
         );
-      }
-      if (saved.ambiguous.length > 0) {
-        toast.error(
-          "Skipped toggles declared by several INIs",
-          saved.ambiguous.join(", "),
+      } else {
+        // The command only refuses: nothing was written, and that is not an
+        // error by itself, so say which toggles were skipped and why.
+        toast.info(
+          "Nothing was saved",
+          `${refused ? `Refused: ${refused}. ` : "The mod does not declare these toggles. "}${caveat}`,
         );
       }
       // The saved file is now the source of the state, so dropping the preview
