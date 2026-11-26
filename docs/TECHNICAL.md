@@ -339,11 +339,15 @@ archive.
   per-component visibility and automatic camera framing from the mesh bounds.
 - **Toggle controls**: the viewer lists the mod's `$variable` toggles that can
   change the rendered mesh and lets you switch them (e.g. show/hide a part)
-  without editing the INI. A variable is offered only when it is used in an
-  `if` / `elif` / `else if` condition, has at least two known numeric values
-  (from `$var = n` and comma-separated `$var = a, b` assignments plus
-  `$var == n`/`$var != n` comparisons; a lone `0`/`1` is completed to the
-  boolean pair), and at least one alternative changes the model fingerprint:
+  without editing the INI. A variable is offered only when a `[Key*]` section
+  binds it with a `$var = ...` assignment — the mod's actual in-game controls —
+  so `[Constants]` defaults, `[Present]`-derived guards, and condition-only
+  internal flags are never exposed even when they change geometry. It must also
+  be used in an `if` / `elif` / `else if` condition, have at least two known
+  numeric values (from `$var = n` and comma-separated `$var = a, b` assignments
+  plus `$var == n`/`$var != n` comparisons; a lone `0`/`1` is completed to the
+  boolean pair), and have at least one alternative that changes the model
+  fingerprint:
   renderable resources bound on an active path, the colour map resolved for each
   part and index buffer, and the `drawindexed` ranges with their colour maps.
   Normal/light/glow/mask maps and null placeholders are excluded from the

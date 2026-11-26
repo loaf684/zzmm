@@ -27,10 +27,10 @@ pub struct MeshPart {
     pub source_files: Vec<String>,
 }
 
-/// One mod toggle the preview can change: a `$variable` that gates a resource
-/// binding, and the values it is known to take. Only variables whose value
-/// actually changes the rendered mesh are reported, so the viewer never shows a
-/// control that does nothing.
+/// One mod toggle the preview can change: a `[Key*]`-bound `$variable` that
+/// gates a resource binding, and the values it is known to take. Only variables
+/// whose value actually changes the rendered mesh are reported, so the viewer
+/// never shows a control that does nothing.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewToggle {
