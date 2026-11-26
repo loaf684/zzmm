@@ -165,9 +165,10 @@ function PartMesh({ part, visible, wireframe }: PartMeshProps) {
       <meshStandardMaterial
         map={hasUvs ? texture ?? undefined : undefined}
         // With a diffuse texture the base colour stays white so the map's own
-        // colours are shown unmodified. The neutral clay colour is only the
-        // fallback for parts that ship no colour map at all.
-        color={hasUvs && texture ? "#ffffff" : "#e8ebf0"}
+        // colours are shown unmodified. A part with no colour map is drawn in a
+        // clearly darker neutral grey: bright clay used to read as a failed
+        // texture load, and the panel now names the count instead.
+        color={hasUvs && texture ? "#ffffff" : "#aeb5c0"}
         roughness={0.68}
         metalness={0.03}
         wireframe={wireframe}
