@@ -299,7 +299,7 @@ export function ModDetailPanel({
       const count = saved.written.length;
       toast.success(
         count === 1 ? "Saved 1 toggle to the game" : `Saved ${count} toggles to the game`,
-        `${saved.file}${saved.backup ? ` (backup ${saved.backup})` : ""}`,
+        `${saved.file}${saved.backup ? ` · backup ${saved.backup}` : ""} — close the game for these to stick: 3DMigoto rewrites this file while it runs.`,
       );
       if (saved.missing.length > 0) {
         toast.error(
