@@ -457,6 +457,7 @@ export function ModDetailPanel({
                       hiddenParts={hiddenParts}
                       wireframe={wireframe}
                       outline={outline}
+                      frameKey={mod.folderName}
                       className="h-full w-full border-0"
                     />
                   ) : previewBusy ? (
