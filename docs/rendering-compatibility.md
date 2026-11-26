@@ -173,10 +173,12 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   (`S11Mod` asks for 70221 of a 69273-index IB). The game still draws the
   buffer, so the preview clamps the range, renders the part that exists and
   names the shortfall instead of hiding the whole mesh.
-- **Disabled draws:** `; drawindexed = ...` is the mod switching a draw off, so
-  the buffer is treated as explicitly range-driven with no ranges and the part
-  is omitted. Without that, the preview fell back to drawing the whole buffer
-  and stacked phantom geometry over `S11Mod`'s body.
+- **Commented draws:** a `; drawindexed = ...` line is a dump commenting out the
+  *replacement* draw, not geometry that does not exist. `S11Mod`'s three index
+  buffers cover disjoint vertex ranges that together are the whole body
+  (15,604 + 3,294 + 34 = 18,932), and only the first has a live replacement
+  draw; the other two are drawn as the whole buffer, exactly as the game draws
+  them. Treating the commented pair as absent dropped 3,071 real triangles.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
