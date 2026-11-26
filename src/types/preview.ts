@@ -48,3 +48,18 @@ export interface PreviewToggle {
   /** Known numeric values, sorted; always at least two entries. */
   options: string[];
 }
+
+/**
+ * What saving the preview choices wrote. `missing` are toggles this mod does
+ * not declare (or whose value is not numeric); `ambiguous` are declared by more
+ * than one INI, so the loader namespace cannot be decided without guessing.
+ */
+export interface PreviewToggleSave {
+  /** d3dx_user.ini (or 3DUser.ini) that was written. */
+  file: string;
+  /** Backup kept on the first write of a session. */
+  backup: string | null;
+  written: string[];
+  missing: string[];
+  ambiguous: string[];
+}
