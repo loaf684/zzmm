@@ -341,6 +341,9 @@ pub fn user_config_key(folder: &str, ini_relative: &str, variable: &str) -> Stri
 /// so a save with no effective change does not rewrite the file.
 pub fn write_user_value(content: &str, key: &str, value: &str) -> Option<String> {
     let wanted = key.to_ascii_lowercase();
+    // 3DMigoto writes CRLF. Rebuild with whatever the file already uses so a
+    // save never rewrites 872 line endings just to change one value.
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     let mut replaced = false;
 
@@ -376,9 +379,9 @@ pub fn write_user_value(content: &str, key: &str, value: &str) -> Option<String>
         }
     }
 
-    let mut out = lines.join("\n");
+    let mut out = lines.join(newline);
     if content.ends_with('\n') {
-        out.push('\n');
+        out.push_str(newline);
     }
     Some(out)
 }

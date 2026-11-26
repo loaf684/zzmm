@@ -209,9 +209,12 @@ the preview shows. Each value goes under the namespace of the INI that declares
 it — `$\mods\<folder>\<ini>\<variable> = <value>` — because the loader keys
 persisted variables by that path, not by name alone. Only variables the mod
 declares in `[Constants]` and only numeric values are written; anything else is
-reported back in `missing` rather than invented. The first write keeps a
-`d3dx_user.ini.bak` beside the file, and a save that changes nothing leaves the
-file untouched.
+reported back in `missing` rather than invented. A variable two INIs of the same
+mod both declare is reported in `ambiguous` and never written, because the
+loader's namespace would be a guess. The file keeps its own line endings (the
+loader writes CRLF) and every unrelated line, the first write keeps a
+`d3dx_user.ini.bak` beside it, and a save that changes nothing leaves the file
+untouched.
 
 ## Known limits
 

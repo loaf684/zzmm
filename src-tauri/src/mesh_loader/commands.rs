@@ -74,7 +74,11 @@ pub struct SavedToggles {
     pub file: String,
     pub backup: Option<String>,
     pub written: Vec<String>,
+    /// Toggles this mod does not declare (stale panel state, non-numeric value).
     pub missing: Vec<String>,
+    /// Toggles declared by more than one INI, so the namespace the loader
+    /// keeps them under cannot be decided without guessing.
+    pub ambiguous: Vec<String>,
 }
 
 /// Persist the preview's toggle choices where the loader reads them, so the
@@ -147,18 +151,31 @@ fn write_preview_toggles(
 
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+    let mut ambiguous: Vec<String> = Vec::new();
     for value in values {
         let Some(number) = variants::numeric_literal(&value.value) else {
             missing.push(value.name.clone());
             continue;
         };
-        let Some(relative) = parsed
+        let declaring: Vec<String> = parsed
             .iter()
-            .find(|(_, lines)| variants::declares_constant(lines, &value.name))
+            .filter(|(_, lines)| variants::declares_constant(lines, &value.name))
             .map(|(relative, _)| relative.clone())
-        else {
-            missing.push(value.name.clone());
-            continue;
+            .collect();
+        let relative = match declaring.len() {
+            0 => {
+                missing.push(value.name.clone());
+                continue;
+            }
+            // The loader keys a persisted variable by the INI that declares it.
+            // Two INIs claiming the same variable means the right namespace is
+            // unknowable, so report it instead of picking one and being wrong
+            // in game.
+            1 => declaring.into_iter().next().unwrap_or_default(),
+            _ => {
+                ambiguous.push(value.name.clone());
+                continue;
+            }
         };
         entries.push((
             variants::user_config_key(folder_name, &relative, &value.name),
@@ -167,10 +184,16 @@ fn write_preview_toggles(
     }
 
     if entries.is_empty() {
-        return Err(AppError::Preview(
-            "None of these toggles is declared by this mod's INI files, so nothing was saved."
-                .to_string(),
-        ));
+        let mut reason =
+            String::from("None of these toggles could be saved for this mod");
+        if !ambiguous.is_empty() {
+            reason.push_str(&format!(
+                "; {} is declared by more than one INI, so its namespace is ambiguous",
+                ambiguous.join(", ")
+            ));
+        }
+        reason.push('.');
+        return Err(AppError::Preview(reason));
     }
 
     let (content, encoding) = text::read(&user_ini)?;
@@ -196,6 +219,7 @@ fn write_preview_toggles(
         backup,
         written,
         missing,
+        ambiguous,
     })
 }
 
@@ -2457,6 +2481,102 @@ drawindexed = 3, 0, 0
             "another mod's line survives"
         );
         assert!(content.starts_with("; header"), "comments survive");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_saved_toggle_is_read_back_as_the_selected_variant() {
+        // The claim the feature makes: save in the preview, reload, and the
+        // preview (and therefore the game) starts on the saved variant.
+        let scratch = Scratch::new("HatMod");
+        scratch.write_text(
+            "HatMod.ini",
+            "[Constants]\n\
+             global persist $show_hat = 0\n\
+             \n\
+             [ResourceHatOffPosition]\nfilename = HatOffPosition.buf\nstride = 40\n\n\
+             [ResourceHatOnPosition]\nfilename = HatOnPosition.buf\nstride = 40\n\n\
+             [ResourceHatIB]\nfilename = Hat.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverrideHat]\n\
+             if $show_hat == 0\n\
+             \tvb0 = ResourceHatOffPosition\n\
+             \tib = ResourceHatIB\n\
+             \tdrawindexed = 3, 0, 0\n\
+             else\n\
+             \tvb0 = ResourceHatOnPosition\n\
+             \tib = ResourceHatIB\n\
+             \tdrawindexed = 3, 0, 0\n\
+             endif\n",
+        );
+        scratch.write(
+            "HatOffPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        scratch.write(
+            "HatOnPosition.buf",
+            &position_buf(&[[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]),
+        );
+        scratch.write("Hat.ib", &u16_indices(&[0, 1, 2]));
+        // The loader's user state, in the CRLF style 3DMigoto writes.
+        scratch.write("d3dx_user.ini", b"; header\r\n[Constants]\r\n");
+
+        let before = scratch.build().expect("baseline preview");
+        assert_eq!(before.parts[0].name, "HatOff");
+
+        let saved = write_preview_toggles(
+            &scratch.root,
+            &scratch.folder,
+            &[PreviewToggleValue {
+                name: "Show_Hat".to_string(),
+                value: "1".to_string(),
+            }],
+        )
+        .expect("saved");
+        assert_eq!(saved.written.len(), 1, "{saved:?}");
+        assert!(saved.missing.is_empty() && saved.ambiguous.is_empty());
+
+        // Reload: no overrides, only what the save wrote.
+        let after = scratch.build().expect("preview after save");
+        assert_eq!(after.parts[0].name, "HatOn", "{:?}", after.parts);
+        assert!(after.toggles_applied, "the saved state drove the build");
+
+        // The file kept its CRLF style and the untouched lines.
+        let written = fs::read(scratch.dir.join("d3dx_user.ini")).expect("read user ini");
+        let text = String::from_utf8(written).expect("utf8");
+        assert!(text.contains("\r\n"), "CRLF preserved");
+        assert_eq!(
+            text.matches("\n").count(),
+            text.matches("\r\n").count(),
+            "no bare LF introduced"
+        );
+        assert!(text.starts_with("; header"));
+    }
+
+    #[test]
+    fn a_toggle_declared_by_two_inis_is_reported_as_ambiguous() {
+        let mods = std::env::temp_dir().join(format!("zzmm-ambig-{}", std::process::id()));
+        let root = mods.join("AmbigMod");
+        let _ = std::fs::remove_dir_all(&mods);
+        fs::create_dir_all(&root).expect("mod dir");
+        for name in ["a.ini", "b.ini"] {
+            fs::write(
+                root.join(name),
+                "[Constants]\n global persist $jacket = 1\n",
+            )
+            .expect("ini");
+        }
+        fs::write(mods.join("d3dx_user.ini"), "[Constants]\n").expect("user ini");
+
+        let result = write_preview_toggles(
+            &mods,
+            "AmbigMod",
+            &[PreviewToggleValue {
+                name: "jacket".to_string(),
+                value: "0".to_string(),
+            }],
+        );
+        assert!(result.is_err(), "ambiguous namespace must not be guessed");
 
         let _ = std::fs::remove_dir_all(&mods);
     }
