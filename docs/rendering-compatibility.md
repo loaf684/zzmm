@@ -177,6 +177,10 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   from game state is assigned a literal or another variable's value instead and
   stays hidden, which is what keeps internal guards (BelleStars' `$bear`) out of
   the panel even though they change geometry.
+  Menu art is not a control signal: a `ps-t100` binding to a menu
+  `ResourceMenuItem` texture is excluded from the fingerprint, so a flag that
+  only swaps the in-game menu graphic earns no control, while one that gates a
+  draw or a body colour map still does. The preview cannot show the menu itself.
 - **Orientation:** positions are rotated from the game's Z-up to the viewer's
   Y-up when the bounding box shows a vertical Z extent, without touching the
   source buffers.
