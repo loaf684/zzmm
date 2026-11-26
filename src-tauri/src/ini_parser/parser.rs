@@ -419,4 +419,287 @@ mod tests {
         assert!(has_key_sections("  [keytoggle]\nkey = VK_2\n"));
         assert!(!has_key_sections("[TextureOverrideX]\nhash = abc\n"));
     }
+
+    #[test]
+    fn split_and_join_round_trip_every_line_layout() {
+        for sample in [
+            "",
+            "\n",
+            "\r\n",
+            "\r\n\r\n",
+            "no newline at the end",
+            "a\nb",
+            "a\r\nb\r\n",
+            "mixed\nline\r\nendings\n",
+            "; comment only\n",
+        ] {
+            assert_eq!(
+                join_lines(&split_lines(sample)),
+                sample,
+                "round trip of {sample:?}"
+            );
+        }
+
+        assert!(split_lines("").is_empty());
+
+        let lines = split_lines("a\r\nb\nc");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            (lines[0].text.as_str(), lines[0].ending.as_str()),
+            ("a", "\r\n")
+        );
+        assert_eq!(
+            (lines[1].text.as_str(), lines[1].ending.as_str()),
+            ("b", "\n")
+        );
+        assert_eq!(
+            (lines[2].text.as_str(), lines[2].ending.as_str()),
+            ("c", "")
+        );
+    }
+
+    #[test]
+    fn section_spans_cover_only_their_own_lines() {
+        let lines =
+            split_lines("; lead\n[KeyA]\nkey = x\n\n[TextureOverrideB]\n[padding]\nhash = y\n");
+        let found = sections(&lines);
+
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            (found[0].name.as_str(), found[0].header, found[0].end),
+            ("KeyA", 1, 4)
+        );
+        assert_eq!(
+            (found[1].name.as_str(), found[1].header, found[1].end),
+            ("TextureOverrideB", 4, 5)
+        );
+        assert_eq!(
+            (found[2].name.as_str(), found[2].header, found[2].end),
+            ("padding", 5, lines.len())
+        );
+    }
+
+    #[test]
+    fn commented_and_malformed_headers_are_not_sections() {
+        let lines = split_lines("; [KeyFake]\n# [KeyAlsoFake]\n[]\n[unclosed\n[Real]\n");
+        let found = sections(&lines);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Real");
+        assert_eq!((found[0].header, found[0].end), (4, 5));
+    }
+
+    #[test]
+    fn replacing_a_value_keeps_indent_comment_and_line_ending() {
+        let mut lines = split_lines("[KeyA]\r\n\tkey   =  ctrl VK_F1   ; can be changed\r\n");
+        let index = find_setting(&lines, "KeyA", "KEY").expect("setting");
+
+        assert!(replace_value(&mut lines, index, "alt VK_F2"));
+        assert_eq!(lines[index].text, "\tkey   =  alt VK_F2   ; can be changed");
+        assert_eq!(
+            join_lines(&lines),
+            "[KeyA]\r\n\tkey   =  alt VK_F2   ; can be changed\r\n"
+        );
+    }
+
+    #[test]
+    fn value_replacement_refuses_lines_that_are_not_settings() {
+        let mut lines = split_lines("[KeyA]\n; key = x\n\n= orphan\n[KeyB]\n");
+        let before = join_lines(&lines);
+
+        for index in 0..lines.len() {
+            assert!(
+                !replace_value(&mut lines, index, "y"),
+                "line {index} is not a setting"
+            );
+        }
+
+        assert_eq!(join_lines(&lines), before);
+    }
+
+    #[test]
+    fn a_value_may_contain_equals_and_only_a_semicolon_ends_it() {
+        let mut lines = split_lines("[KeyA]\nfilter = a=b\n");
+        let index = find_setting(&lines, "KeyA", "filter").expect("setting");
+
+        assert!(replace_value(&mut lines, index, "c=d"));
+        assert_eq!(lines[index].text, "filter = c=d");
+
+        // Only `;` starts a trailing comment, so `#` stays inside the value
+        // span — the span `replace_value` overwrites.
+        let lines = split_lines("[KeyA]\nkey = a=b # tail\n");
+        let section = sections(&lines)[0].clone();
+        assert_eq!(
+            section_settings(&lines, &section),
+            vec![("key".to_string(), "a=b # tail".to_string())]
+        );
+    }
+
+    #[test]
+    fn insertion_matches_section_indent_and_skips_trailing_blanks() {
+        let mut lines = split_lines("[KeyA]\r\n    key = x\r\n\r\n[KeyB]\r\nkey = y\r\n");
+        let section = sections(&lines)
+            .into_iter()
+            .find(|section| section.name == "KeyA")
+            .expect("section");
+
+        insert_setting(&mut lines, &section, "condition", "$a == 1", "\r\n");
+
+        assert_eq!(
+            join_lines(&lines),
+            "[KeyA]\r\n    key = x\r\n    condition = $a == 1\r\n\r\n[KeyB]\r\nkey = y\r\n"
+        );
+    }
+
+    #[test]
+    fn insertion_terminates_an_unterminated_last_line() {
+        let mut lines = split_lines("[KeyA]\nkey = x");
+        let section = sections(&lines)[0].clone();
+
+        insert_setting(&mut lines, &section, "type", "hold", "\n");
+
+        assert_eq!(join_lines(&lines), "[KeyA]\nkey = x\ntype = hold\n");
+    }
+
+    #[test]
+    fn insertion_into_an_empty_section_creates_the_first_setting() {
+        let mut lines = split_lines("[KeyA]");
+        let section = sections(&lines)[0].clone();
+
+        insert_setting(&mut lines, &section, "key", "VK_F1", "\n");
+
+        assert_eq!(join_lines(&lines), "[KeyA]\nkey = VK_F1\n");
+    }
+
+    #[test]
+    fn dominant_newline_follows_the_first_line_ending() {
+        assert_eq!(dominant_newline(&split_lines("a\nb\r\n")), "\n");
+        assert_eq!(dominant_newline(&split_lines("a\r\nb\n")), "\r\n");
+        assert_eq!(dominant_newline(&split_lines("[KeyA]")), "\r\n");
+        assert_eq!(dominant_newline(&[]), "\r\n");
+    }
+
+    #[test]
+    fn finds_settings_only_in_the_named_section() {
+        let lines = split_lines("[KeyA]\nkey = a\n[KeyB]\nkey = b\ncondition = $x\n");
+
+        assert_eq!(find_setting(&lines, "keyb", "KEY"), Some(3));
+        assert_eq!(find_setting(&lines, "KeyB", "condition"), Some(4));
+        assert_eq!(find_setting(&lines, "KeyA", "condition"), None);
+        assert_eq!(find_setting(&lines, "Missing", "key"), None);
+    }
+
+    #[test]
+    fn hotkey_view_keeps_spelling_uppercases_tokens_and_numbers_lines() {
+        let lines = split_lines(
+            "[keyf1]\nKey = ctrl  alt VK_F1\ntYpE = HOLD\ncondition = $on == 1\n$on = 1\n",
+        );
+        let hotkeys = parse_hotkeys(&lines);
+
+        assert_eq!(hotkeys.len(), 1);
+        let hotkey = &hotkeys[0];
+        assert_eq!(hotkey.section, "keyf1");
+        assert_eq!(hotkey.line, 1);
+        assert_eq!(hotkey.key_setting.as_deref(), Some("Key"));
+        assert_eq!(hotkey.type_setting.as_deref(), Some("tYpE"));
+        assert_eq!(hotkey.binding, "ctrl  alt VK_F1");
+        assert_eq!(hotkey.action_type, "hold");
+        assert_eq!(hotkey.tokens, vec!["CTRL", "ALT", "VK_F1"]);
+        assert!(hotkey.has_key);
+        assert_eq!(
+            (hotkey.variables[0].name.as_str(), hotkey.variables[0].line),
+            ("$on", 5)
+        );
+        assert_eq!(
+            (
+                hotkey.settings[0].key.as_str(),
+                hotkey.settings[0].value.as_str(),
+                hotkey.settings[0].line
+            ),
+            ("condition", "$on == 1", 4)
+        );
+    }
+
+    #[test]
+    fn a_key_setting_outside_a_key_section_is_not_a_hotkey() {
+        let lines =
+            split_lines("[TextureOverrideX]\nkey = ctrl VK_F1\n[KeySwapC]\nkey = VK_2\n");
+        let hotkeys = parse_hotkeys(&lines);
+
+        assert_eq!(hotkeys.len(), 1);
+        assert_eq!(hotkeys[0].section, "KeySwapC");
+        assert_eq!(hotkeys[0].binding, "VK_2");
+    }
+
+    #[test]
+    fn a_key_section_without_a_binding_is_reported_as_unbound() {
+        let lines = split_lines("[KeyEmpty]\ncondition = $a == 1\n");
+        let hotkeys = parse_hotkeys(&lines);
+
+        assert_eq!(hotkeys.len(), 1);
+        assert!(!hotkeys[0].has_key);
+        assert!(hotkeys[0].key_setting.is_none());
+        assert_eq!(hotkeys[0].binding, "");
+        assert!(hotkeys[0].tokens.is_empty());
+        assert_eq!(hotkeys[0].action_type, "activate");
+    }
+
+    #[test]
+    fn action_type_maps_known_values_and_falls_back_to_custom() {
+        assert_eq!(normalize_action(""), "activate");
+        assert_eq!(normalize_action("   "), "activate");
+        assert_eq!(normalize_action(" ACTIVATE "), "activate");
+        assert_eq!(normalize_action("Cycle"), "cycle");
+        assert_eq!(normalize_action("turbo"), "custom");
+    }
+
+    #[test]
+    fn section_views_count_only_real_settings() {
+        let lines = split_lines(
+            "[KeyA]\nkey = x\n; note\n\n$var = 1\n[TextureOverrideB]\nhash = abc\n# tail\n",
+        );
+        let views = parse_section_views(&lines);
+
+        assert_eq!(views.len(), 2);
+        assert_eq!(
+            (
+                views[0].name.as_str(),
+                views[0].line,
+                views[0].setting_count,
+                views[0].is_hotkey
+            ),
+            ("KeyA", 1, 2, true)
+        );
+        assert_eq!(
+            (
+                views[1].name.as_str(),
+                views[1].line,
+                views[1].setting_count,
+                views[1].is_hotkey
+            ),
+            ("TextureOverrideB", 6, 1, false)
+        );
+    }
+
+    #[test]
+    fn section_settings_keep_order_and_drop_trailing_comments() {
+        let lines = split_lines("[KeyA]\nb = 2 ; note\n\n; skip\na = 1\n");
+        let section = sections(&lines)[0].clone();
+
+        assert_eq!(
+            section_settings(&lines, &section),
+            vec![
+                ("b".to_string(), "2".to_string()),
+                ("a".to_string(), "1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn precheck_ignores_comments_and_other_sections() {
+        assert!(has_key_sections("[KEYF1]\n"));
+        assert!(has_key_sections("\t[keytoggle]\n"));
+        assert!(!has_key_sections("; [KeyF1]\n[TextureOverrideX]\nhash = abc\n"));
+        assert!(!has_key_sections(""));
+    }
 }

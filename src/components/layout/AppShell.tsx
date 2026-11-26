@@ -22,8 +22,8 @@ import {
 
 import appIcon from "@/assets/app-icon.png";
 import { Button } from "@/components/ui/Button";
+import { CharacterAvatar } from "@/components/ui/CharacterAvatar";
 import { ToastViewport } from "@/components/ui/Toast";
-import { characterIcon } from "@/lib/characterIcons";
 import { cn } from "@/lib/cn";
 import { useInstallerStore } from "@/store/installer";
 import { useModsStore } from "@/store/mods";
@@ -535,45 +535,4 @@ export function AppShell() {
   );
 }
 
-function CharacterAvatar({
-  character,
-  active,
-}: {
-  character: string;
-  active: boolean;
-}) {
-  const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
-    setFailed(false);
-  }, [character]);
-
-  const src = useMemo(
-    () => (failed ? null : characterIcon(character)),
-    [character, failed],
-  );
-
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full border font-mono text-[9px]",
-        active
-          ? "border-acid-400/50 bg-acid-400/10 text-acid-300"
-          : "border-ink-700 bg-ink-900 text-zinc-500",
-      )}
-    >
-      {src ? (
-        <img
-          src={src}
-          alt=""
-          draggable={false}
-          className="h-full w-full object-cover"
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        character.slice(0, 1).toUpperCase()
-      )}
-    </span>
-  );
-}

@@ -123,6 +123,8 @@ pub struct HotkeyConflictEntry {
     pub line: u32,
     pub binding: String,
     pub action_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

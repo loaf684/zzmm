@@ -178,4 +178,36 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn decode_drops_a_truncated_utf16_byte_instead_of_failing() {
+        let (text, encoding) = decode(&[0xFF, 0xFE, b'A']);
+
+        assert_eq!(encoding, Encoding::Utf16Le);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("zzmm-ini-atomic-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("mod.ini");
+        fs::write(&path, "key = old\n").expect("seed");
+
+        write_atomic(&path, "[KeyA]\r\nkey = x\r\n".as_bytes()).expect("write");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            "[KeyA]\r\nkey = x\r\n"
+        );
+
+        let left: Vec<String> = fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(left, vec!["mod.ini"], "the temporary file is renamed away");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
