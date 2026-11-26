@@ -136,6 +136,10 @@ clothing from rendering as opaque cards without tinting the opaque parts.
   entry while every part still loads from its relative path.
 - **Missing files** produce a warning naming the resource and leave the part
   untextured rather than failing the whole preview.
+- **Empty or truncated buffers** never drop a part silently: a zero-byte or
+  too-short `*Position.buf` is named and skipped ("`X.buf` is empty (0 bytes);
+  that part is skipped."), an unusable index buffer keeps the sequential-triangle
+  fallback and says so, and hitting the 24-part or 16-INI cap reports the limit.
 - **Toggle state:** alternatives not drawn by the saved state are skipped and
   counted in the preview warnings.
 - **Orientation:** positions are rotated from the game's Z-up to the viewer's

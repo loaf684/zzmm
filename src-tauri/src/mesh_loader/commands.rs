@@ -87,7 +87,7 @@ fn build_preview(
     // Read each INI once: resource sections and the `if`/`endif` command lists
     // that choose between variants come from the same lines.
     let mut parsed: Vec<ParsedIni> = Vec::new();
-    for (relative, path, _size) in collect_ini_files(&root)
+    let ini_files: Vec<_> = collect_ini_files(&root)
         .into_iter()
         // `DISABLED_*` INIs are the manager's own backups: reading them would
         // add a second copy of every resource, pointing at stale paths, and
@@ -100,8 +100,18 @@ fn build_preview(
                 .to_ascii_lowercase();
             !is_ignored_ini_name(&name)
         })
-        .take(MAX_INIS)
-    {
+        .collect();
+
+    // The INI cap drops whole files, and with them every part declared there.
+    // Name the limit so those parts are not lost without a word.
+    if ini_files.len() > MAX_INIS {
+        warnings.push(format!(
+            "Only the first {MAX_INIS} INI files are read; {} more are ignored.",
+            ini_files.len() - MAX_INIS
+        ));
+    }
+
+    for (relative, path, _size) in ini_files.into_iter().take(MAX_INIS) {
         let Ok((content, _encoding)) = text::read(&path) else {
             continue;
         };
@@ -320,9 +330,15 @@ fn build_preview(
         }
     }
 
+    // `MAX_PARTS` is a render budget: note when it drops a whole part here or
+    // mid-split below, so the cap is reported once instead of leaving the
+    // missing parts unexplained.
+    let mut parts_capped = positions.len() > MAX_PARTS;
+
     for position in positions.iter().take(MAX_PARTS) {
         let key = position.part_key();
         let label = part_label(position);
+        let file = file_label(position);
 
         let Some(path) = resolve_file(&root, position) else {
             warnings.push(format!(
@@ -340,11 +356,19 @@ fn build_preview(
             }
         };
 
+        // A part whose data is broken must not vanish without a word: a
+        // zero-byte buffer decodes to a 0-vertex "part" nobody can see, and a
+        // truncated one to a sliver. Name the file, then skip it deliberately.
+        if bytes.is_empty() {
+            warnings.push(format!("{file} is empty (0 bytes); that part is skipped."));
+            continue;
+        }
+
         let Some((stride, vertex_count)) =
             decode::position_layout(&bytes, position.stride, &mut warnings)
         else {
             warnings.push(format!(
-                "{label}: no vertex stride fits {} bytes; skipped.",
+                "{file}: no vertex layout fits {} bytes; that part is skipped.",
                 bytes.len()
             ));
             continue;
@@ -429,6 +453,15 @@ fn build_preview(
                     ));
                     continue;
                 };
+                // An empty index buffer draws nothing. Say which file, so the
+                // slice that disappears from the model is explained.
+                if index_bytes.is_empty() {
+                    warnings.push(format!(
+                        "{} is empty (0 bytes); that slice is skipped.",
+                        plan.resource.filename.clone().unwrap_or_default()
+                    ));
+                    continue;
+                }
                 if plan.resource.format.is_none() {
                     used_default_layout = true;
                 }
@@ -525,6 +558,7 @@ fn build_preview(
 
         for piece in pieces {
             if parts.len() >= MAX_PARTS {
+                parts_capped = true;
                 break;
             }
 
@@ -643,6 +677,10 @@ fn build_preview(
                 source_files: files,
             });
         }
+    }
+
+    if parts_capped {
+        warnings.push(format!("Only the first {MAX_PARTS} parts are shown."));
     }
 
     if hidden_parts > 0 {
@@ -1179,8 +1217,14 @@ fn resolve_indices(
     ) {
         Some(indices) => (Some(indices), Some(index_resource)),
         None => {
+            let file = index_resource.filename.clone().unwrap_or_default();
+            let reason = if bytes.is_empty() {
+                "is empty (0 bytes)"
+            } else {
+                "does not fit the mesh"
+            };
             warnings.push(format!(
-                "{label}: index buffer does not fit the mesh; assuming sequential triangles."
+                "{label}: index buffer {file} {reason}; assuming sequential triangles."
             ));
             if vertex_count % 3 == 0 {
                 (
@@ -2155,6 +2199,283 @@ mod texture_tests {
         assert_eq!(toggled.parts[0].name, "WeaponOn");
         assert_eq!(toggled.parts[0].vertex_count, 8);
         assert_eq!(toggled.toggles[0].value, "1");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    /// One throwaway mods directory holding a single `name` mod folder, so
+    /// `build_preview` can be exercised end to end. Keys are paths relative to
+    /// the mod root.
+    fn write_preview_mod(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
+        let mods = std::env::temp_dir().join(format!("zzmm-preview-{name}-{}", std::process::id()));
+        let root = mods.join(name);
+        let _ = std::fs::remove_dir_all(&mods);
+        std::fs::create_dir_all(&root).expect("temp mod dir");
+
+        for (relative, bytes) in files {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("temp file dir");
+            }
+            std::fs::write(&path, bytes).expect("temp file");
+        }
+
+        mods
+    }
+
+    /// ZZZ's 40-byte vertex: 12 bytes of position, 28 bytes of padding.
+    fn vertex_buffer(vertices: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(vertices * 40);
+        for index in 0..vertices {
+            let base = index as f32 * 0.1;
+            for value in [base, 0.0, base * 0.5] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0u8; 28]);
+        }
+        bytes
+    }
+
+    fn index_buffer(indices: &[u16]) -> Vec<u8> {
+        indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect()
+    }
+
+    /// An INI declaring two independent parts, each a stride-40 position `.buf`
+    /// beside its own `.ib`, with no `vb0`/`ib` bindings.
+    fn two_part_ini(broken: &str, healthy: &str) -> String {
+        format!(
+            "[Resource{broken}Position]\r\n\
+             filename = {broken}Position.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [Resource{broken}IB]\r\n\
+             filename = {broken}.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [Resource{healthy}Position]\r\n\
+             filename = {healthy}Position.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [Resource{healthy}IB]\r\n\
+             filename = {healthy}.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n"
+        )
+    }
+
+    #[test]
+    fn an_empty_position_buffer_is_skipped_with_a_warning() {
+        let ini = format!(
+            "{}\
+             [ResourceShortHairPosition]\r\n\
+             filename = ShortHairPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceShortHairIB]\r\n\
+             filename = ShortHair.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n",
+            two_part_ini("BrokenHair", "GoodBody")
+        );
+        let mods = write_preview_mod(
+            "EmptyPositionMod",
+            &[
+                ("mod.ini", ini.into_bytes()),
+                ("BrokenHairPosition.buf", Vec::new()),
+                ("ShortHairPosition.buf", vertex_buffer(1)),
+                ("GoodBodyPosition.buf", vertex_buffer(6)),
+                ("GoodBody.ib", index_buffer(&[0, 1, 2, 1, 2, 3])),
+            ],
+        );
+
+        let preview = build_preview(&mods, "EmptyPositionMod", None).expect("preview builds");
+
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning == "BrokenHairPosition.buf is empty (0 bytes); that part is skipped."),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(
+            preview.warnings.iter().any(|warning| warning
+                == "ShortHairPosition.buf: no vertex layout fits 40 bytes; that part is skipped."),
+            "{:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(preview.parts[0].name, "GoodBody");
+        assert_eq!(preview.parts[0].vertex_count, 6);
+        assert_eq!(preview.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn the_part_cap_warns_once_and_names_the_limit() {
+        let mut ini = String::new();
+        let mut files: Vec<(String, Vec<u8>)> = (0..=MAX_PARTS)
+            .map(|index| {
+                ini.push_str(&format!(
+                    "[ResourceCapped{index:02}Position]\r\n\
+                     filename = Capped{index:02}Position.buf\r\n\
+                     stride = 40\r\n\
+                     \r\n"
+                ));
+                (format!("Capped{index:02}Position.buf"), vertex_buffer(12))
+            })
+            .collect();
+        files.push(("mod.ini".to_string(), ini.into_bytes()));
+        let refs: Vec<(&str, Vec<u8>)> = files
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect();
+
+        let mods = write_preview_mod("PartCapMod", &refs);
+        let preview = build_preview(&mods, "PartCapMod", None).expect("preview builds");
+
+        let cap: Vec<&String> = preview
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("Only the first"))
+            .collect();
+        assert_eq!(cap.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(*cap[0], "Only the first 24 parts are shown.");
+        assert_eq!(preview.parts.len(), MAX_PARTS);
+        assert_eq!(preview.parts[0].name, "Capped00");
+        assert_eq!(preview.parts[MAX_PARTS - 1].name, "Capped23");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_truncated_index_buffer_names_the_file_and_still_builds() {
+        let ini = two_part_ini("TruncatedBody", "HealthyBody");
+        let mods = write_preview_mod(
+            "TruncatedIndexMod",
+            &[
+                ("mod.ini", ini.into_bytes()),
+                ("TruncatedBodyPosition.buf", vertex_buffer(6)),
+                // Cut off mid-index: neither a whole 16- nor 32-bit list.
+                ("TruncatedBody.ib", vec![1, 0, 2, 0, 1]),
+                ("HealthyBodyPosition.buf", vertex_buffer(6)),
+                ("HealthyBody.ib", index_buffer(&[0, 1, 2, 1, 2, 3])),
+            ],
+        );
+
+        let preview = build_preview(&mods, "TruncatedIndexMod", None).expect("preview builds");
+
+        assert!(
+            preview.warnings.iter().any(|warning| warning
+                == "TruncatedBody: index buffer TruncatedBody.ib does not fit the mesh; skipped."),
+            "{:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(preview.parts[0].name, "HealthyBody");
+        assert_eq!(preview.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn an_empty_index_buffer_names_the_file_before_dropping_the_slice() {
+        let ini = two_part_ini("EmptySlice", "HealthyBody");
+        let mods = write_preview_mod(
+            "EmptyIndexMod",
+            &[
+                ("mod.ini", ini.into_bytes()),
+                ("EmptySlicePosition.buf", vertex_buffer(6)),
+                ("EmptySlice.ib", Vec::new()),
+                ("HealthyBodyPosition.buf", vertex_buffer(6)),
+                ("HealthyBody.ib", index_buffer(&[0, 1, 2, 1, 2, 3])),
+            ],
+        );
+
+        let preview = build_preview(&mods, "EmptyIndexMod", None).expect("preview builds");
+
+        assert!(
+            preview.warnings.iter().any(|warning| warning
+                == "EmptySlice.ib is empty (0 bytes); that slice is skipped."),
+            "{:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(preview.parts[0].name, "HealthyBody");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn an_unusable_single_index_buffer_warns_and_falls_back() {
+        // `Wrapper.ib` shares no component name with the position, so it is not
+        // a slice plan; the single-IB path still finds it and must explain why
+        // the mesh is drawn with sequential triangles instead.
+        let ini = "[ResourceLooseBodyPosition]\r\n\
+                   filename = LooseBodyPosition.buf\r\n\
+                   stride = 40\r\n\
+                   \r\n\
+                   [ResourceWrapperIB]\r\n\
+                   filename = Wrapper.ib\r\n\
+                   format = DXGI_FORMAT_R16_UINT\r\n";
+        let mods = write_preview_mod(
+            "UnusableIndexMod",
+            &[
+                ("mod.ini", ini.as_bytes().to_vec()),
+                ("LooseBodyPosition.buf", vertex_buffer(6)),
+                ("Wrapper.ib", Vec::new()),
+            ],
+        );
+
+        let preview = build_preview(&mods, "UnusableIndexMod", None).expect("preview builds");
+
+        assert!(
+            preview.warnings.iter().any(|warning| warning
+                .contains("index buffer Wrapper.ib is empty (0 bytes); assuming sequential triangles.")),
+            "{:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(preview.parts[0].name, "LooseBody");
+        assert_eq!(preview.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn the_ini_cap_warns_when_it_drops_files() {
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        for index in 0..=MAX_INIS {
+            files.push((
+                format!("a{index:02}.ini"),
+                format!(
+                    "[ResourceIni{index:02}Position]\r\n\
+                     filename = Ini{index:02}Position.buf\r\n\
+                     stride = 40\r\n"
+                )
+                .into_bytes(),
+            ));
+            files.push((format!("Ini{index:02}Position.buf"), vertex_buffer(12)));
+        }
+        let refs: Vec<(&str, Vec<u8>)> = files
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect();
+
+        let mods = write_preview_mod("IniCapMod", &refs);
+        let preview = build_preview(&mods, "IniCapMod", None).expect("preview builds");
+
+        let cap: Vec<&String> = preview
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("INI files are read"))
+            .collect();
+        assert_eq!(cap.len(), 1, "{:?}", preview.warnings);
+        assert_eq!(*cap[0], "Only the first 16 INI files are read; 1 more are ignored.");
+        // The 17th INI is never read, so its part is absent by the same cap.
+        assert_eq!(preview.parts.len(), MAX_INIS, "{:?}", preview.warnings);
 
         let _ = std::fs::remove_dir_all(&mods);
     }
