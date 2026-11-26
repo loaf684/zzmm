@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
@@ -232,13 +232,22 @@ export function ModDetailPanel({
     previewForMod?.parts.filter((part) => !part.texture).length ?? 0;
 
   // The expanded stage belongs to the 3D viewer only; switching to the image
-  // carousel or losing the mesh docks it back into the panel.
+  // carousel or losing the mesh docks it back into the panel. A preview with no
+  // parts has nothing to show full-window, so it is not expandable at all.
+  const hasPreviewParts = (previewForMod?.parts.length ?? 0) > 0;
   const stageExpanded =
-    expanded && viewerMode === "3d" && previewForMod !== null;
+    expanded && viewerMode === "3d" && hasPreviewParts;
 
   useEffect(() => {
     if (!stageExpanded && expanded) setExpanded(false);
   }, [stageExpanded, expanded]);
+
+  // Expanded, the stage covers the rest of the panel. `inert` keeps the covered
+  // header, controls and footer out of the tab order and the accessibility tree
+  // instead of leaving them focusable behind the overlay.
+  const headerInertRef = useInertRef(stageExpanded);
+  const controlsInertRef = useInertRef(stageExpanded);
+  const footerInertRef = useInertRef(stageExpanded);
 
   const hotkeyGroups = useMemo(() => {
     const groups = new Map<string, ModHotkey[]>();
@@ -389,7 +398,10 @@ export function ModDetailPanel({
         className="ml-auto flex h-full w-full max-w-[660px] animate-panel-in flex-col border-l border-ink-700/80 bg-gradient-to-b from-ink-950 via-ink-950 to-ink-900/95 shadow-pop"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-ink-800/80 px-6 py-5">
+        <header
+          ref={headerInertRef}
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-ink-800/80 px-6 py-5"
+        >
           <div className="min-w-0">
             <p className="eyebrow">{mod.character.trim() || "Uncategorized"}</p>
             <h2
@@ -559,12 +571,17 @@ export function ModDetailPanel({
                     </span>
                   ) : null}
                   <StageToggle
-                    active={outline}
+                    // While Wire is on the ink shell is not drawn at all (it
+                    // would fill the gap between the wires), so the pill shows
+                    // what is on screen. The stored preference is kept.
+                    active={outline && !wireframe}
                     label="Outline"
                     title={
-                      outline
-                        ? "Hide the ink outline"
-                        : "Show the ink outline"
+                      wireframe
+                        ? "The ink outline is hidden while Wire is on"
+                        : outline
+                          ? "Hide the ink outline"
+                          : "Show the ink outline"
                     }
                     onClick={() => setOutline(!outline)}
                   />
@@ -580,20 +597,24 @@ export function ModDetailPanel({
                   >
                     <RefreshCw className="h-3 w-3" aria-hidden />
                   </IconButton>
-                  <IconButton
-                    label={
-                      stageExpanded
-                        ? "Restore the preview into the panel"
-                        : "Expand the 3D preview to the whole window"
-                    }
-                    onClick={() => setExpanded((current) => !current)}
-                  >
-                    {stageExpanded ? (
-                      <Minimize2 className="h-3 w-3" aria-hidden />
-                    ) : (
-                      <Maximize2 className="h-3 w-3" aria-hidden />
-                    )}
-                  </IconButton>
+                  {/* Nothing to fill the window with when the mod ships no
+                      mesh buffers; the docked placeholder stays. */}
+                  {hasPreviewParts ? (
+                    <IconButton
+                      label={
+                        stageExpanded
+                          ? "Restore the preview into the panel"
+                          : "Expand the 3D preview to the whole window"
+                      }
+                      onClick={() => setExpanded((current) => !current)}
+                    >
+                      {stageExpanded ? (
+                        <Minimize2 className="h-3 w-3" aria-hidden />
+                      ) : (
+                        <Maximize2 className="h-3 w-3" aria-hidden />
+                      )}
+                    </IconButton>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -751,7 +772,7 @@ export function ModDetailPanel({
             ) : null}
           </section>
 
-          <div className="space-y-6 px-6 py-6">
+          <div ref={controlsInertRef} className="space-y-6 px-6 py-6">
             <section aria-label="Actions">
               <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-ink-800/80 bg-ink-900/55 p-2">
                 <div className="flex min-w-0 flex-1 items-center gap-2.5 px-1.5">
@@ -1241,7 +1262,10 @@ export function ModDetailPanel({
         </div>
 
         {dirtyDrafts.length > 0 ? (
-          <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-amber-400/20 bg-ink-950/95 px-6 py-3 shadow-[0_-12px_30px_-24px_rgba(0,0,0,0.9)] backdrop-blur">
+          <footer
+            ref={footerInertRef}
+            className="flex shrink-0 items-center justify-between gap-3 border-t border-amber-400/20 bg-ink-950/95 px-6 py-3 shadow-[0_-12px_30px_-24px_rgba(0,0,0,0.9)] backdrop-blur"
+          >
             <p className="min-w-0 text-[11px] text-zinc-400">
               <span className="font-mono text-amber-300">
                 {dirtyDrafts.length}
@@ -1275,7 +1299,9 @@ export function ModDetailPanel({
 
       {renameOpen ? (
         <div
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-ink-950/70 p-6 backdrop-blur-sm"
+          // Above the expanded stage (z-[75]) so the dialog is never buried
+          // under the full-window preview.
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/70 p-6 backdrop-blur-sm"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !renaming) {
               setRenameOpen(false);
@@ -1325,6 +1351,25 @@ export function ModDetailPanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * `inert` takes a subtree out of the tab order and the accessibility tree.
+ * React 18 has no typed prop for the attribute, so the callback ref writes it
+ * onto the node. A callback ref also runs when the node mounts, which matters
+ * for the footer: it only exists while hotkey edits are pending, and an effect
+ * keyed on `active` alone would leave it focusable. Chromium 102+ implements
+ * the attribute; the app's WebView2 floor is 105.
+ */
+function useInertRef(active: boolean) {
+  return useCallback(
+    (node: HTMLElement | null) => {
+      if (!node) return;
+      if (active) node.setAttribute("inert", "");
+      else node.removeAttribute("inert");
+    },
+    [active],
   );
 }
 

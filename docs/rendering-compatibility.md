@@ -249,8 +249,21 @@ data:
   - Vertices whose normal points at the camera project to zero length; they are
     left in place rather than normalised, which would poison the triangle with
     NaN. These faces are already covered by the surface they back.
+  - With `Wire` on, the surface writes depth only along its edges, so the filled
+    shell would cover every gap between the wires and read as a solid ink
+    silhouette. The shell is therefore **not drawn in wireframe mode**; the
+    `Outline` preference keeps its value and the pill shows the shell as off
+    while the wires are on.
 - **Expanded stage.** The preview header's expand control promotes the preview
   to the whole window (the part chips and `$variable` toggles stay below it);
   the same control, `Escape`, or leaving the 3D tab docks it back. The stage is
   the same `Canvas` in the same DOM node, so expanding only resizes the
   renderer: the camera keeps its orbit, and the mesh is not rebuilt.
+  - Expanded, the panel behind the stage is covered: the header, the controls
+    below the stage and the pending-hotkey footer are marked `inert`, so they
+    leave the tab order and the accessibility tree instead of staying focusable
+    under the overlay.
+  - The rename dialog is layered above the stage (`z-80` against the stage's
+    `z-75`), so it stays usable while the preview fills the window.
+  - A preview with no mesh parts cannot be expanded — there is nothing to fill
+    the window with — so the docked "No mesh buffers found" placeholder stays.
