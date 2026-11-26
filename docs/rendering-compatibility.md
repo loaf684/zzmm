@@ -179,6 +179,14 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   (15,604 + 3,294 + 34 = 18,932), and only the first has a live replacement
   draw; the other two are drawn as the whole buffer, exactly as the game draws
   them. Treating the commented pair as absent dropped 3,071 real triangles.
+- **Per-IB bindings are authoritative:** when a mod binds a diffuse per index
+  buffer (`Resource\ZZMI\Diffuse = ref ...` inside a `TextureOverride` that
+  matches one draw), an index buffer with no binding of its own is painted by
+  the game, not by a sibling's atlas. `component_core` treats `BodyA`/`BodyB` as
+  variants of one component, so the preview used to borrow the body sheet for
+  S11's bag (`S11BodyB`). Such a part now renders neutral with the
+  "no diffuse texture is shipped for this part" warning, which is honest about
+  what the preview cannot read (the game's own `.blk` texture).
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
