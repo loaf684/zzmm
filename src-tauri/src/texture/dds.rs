@@ -76,9 +76,18 @@ fn dxgi_format(value: u32) -> Option<DdsFormat> {
         95 | 96 => Some(DdsFormat::Bc6),
         // BC7
         98 | 99 => Some(DdsFormat::Bc7),
-        // R8G8B8A8 / B8G8R8A8 unordered and sRGB variants
+        // R8G8B8A8 / B8G8R8A8 unordered and sRGB variants. The B8G8R8X8 forms
+        // (88, 90, 92) keep a padding byte where the alpha forms keep alpha, so
+        // reading it as alpha would punch holes in every part using them.
         27 | 28 | 29 => Some(DdsFormat::Rgba8),
-        87 | 88 | 91 => Some(DdsFormat::Bgra8),
+        87 | 89 | 91 => Some(DdsFormat::Bgra8),
+        88 | 90 | 92 => Some(DdsFormat::Masked {
+            bits: 32,
+            red: 0x00FF_0000,
+            green: 0x0000_FF00,
+            blue: 0x0000_00FF,
+            alpha: 0,
+        }),
         _ => None,
     }
 }
@@ -134,21 +143,19 @@ pub fn parse(bytes: &[u8]) -> Result<DdsHeader, String> {
     } else if let Some(format) = fourcc_format(fourcc) {
         (format, 128)
     } else if pixel_bits == 32 || pixel_bits == 24 {
-        let format = if red_mask == 0x0000_00FF && blue_mask == 0x00FF_0000 {
-            if alpha_mask == 0xFF00_0000 {
-                DdsFormat::Rgba8
-            } else {
-                DdsFormat::Masked {
-                    bits: pixel_bits,
-                    red: red_mask,
-                    green: green_mask,
-                    blue: blue_mask,
-                    alpha: alpha_mask,
-                }
-            }
-        } else if blue_mask == 0x0000_00FF && red_mask == 0x00FF_0000 {
+        let format = if red_mask == 0x0000_00FF
+            && blue_mask == 0x00FF_0000
+            && alpha_mask == 0xFF00_0000
+        {
+            DdsFormat::Rgba8
+        } else if blue_mask == 0x0000_00FF
+            && red_mask == 0x00FF_0000
+            && alpha_mask == 0xFF00_0000
+        {
             DdsFormat::Bgra8
         } else {
+            // Any other mask set, X8 layouts included: their fourth byte is
+            // padding, and `alpha == 0` makes the decoder keep them opaque.
             DdsFormat::Masked {
                 bits: pixel_bits,
                 red: red_mask,
@@ -221,6 +228,28 @@ mod tests {
         let mut bytes = header(b"ABCD");
         bytes.extend(vec![0u8; 16]);
         assert!(parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn treats_b8g8r8x8_as_opaque_and_b8g8r8a8_with_alpha() {
+        // B8G8R8X8_TYPELESS keeps padding where alpha would be.
+        let mut x8 = header(b"DX10");
+        x8.extend(90u32.to_le_bytes());
+        x8.extend(vec![0u8; DX10_HEADER_SIZE - 4]);
+        x8.extend(vec![0u8; 16]);
+        let parsed = parse(&x8).expect("valid dds");
+        assert!(
+            matches!(parsed.format, DdsFormat::Masked { alpha: 0, .. }),
+            "X8 must decode as opaque, got {:?}",
+            parsed.format
+        );
+
+        // B8G8R8A8_TYPELESS stores real alpha there.
+        let mut a8 = header(b"DX10");
+        a8.extend(89u32.to_le_bytes());
+        a8.extend(vec![0u8; DX10_HEADER_SIZE - 4]);
+        a8.extend(vec![0u8; 16]);
+        assert_eq!(parse(&a8).expect("valid dds").format, DdsFormat::Bgra8);
     }
 
     #[test]

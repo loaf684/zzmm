@@ -19,6 +19,13 @@ const MAX_TEXTURE_BYTES: u64 = 96 * 1024 * 1024;
 /// Preview textures are capped so a 4K BC7 texture does not cost several MB of
 /// base64 over the IPC bridge.
 const PREVIEW_MAX_SIDE: usize = 1024;
+/// Sources above this are decoded from a sampled block grid instead of the whole
+/// base mip. The pure-Rust decoders cost roughly a minute per 8192x8192 BC7
+/// atlas, and some installed mods ship three of them, which makes the preview
+/// look hung. Keeping every second block at this size still leaves the box
+/// filter below averaging real pixels, and a 1024 px thumbnail cannot show the
+/// rest.
+const MAX_DECODE_SIDE: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct DecodedTexture {
@@ -29,10 +36,26 @@ pub struct DecodedTexture {
 
 /// Decode the base mip of a DDS file to RGBA8.
 pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
+    decode_dds_capped(bytes, MAX_DECODE_SIDE).map(|decoded| decoded.texture)
+}
+
+/// A decoded base mip plus how coarsely it had to be sampled.
+#[derive(Debug, Clone)]
+pub struct DecodedDds {
+    pub texture: DecodedTexture,
+    /// Blocks (compressed) or pixels (uncompressed) skipped per axis. 1 means
+    /// the whole base mip was decoded.
+    pub stride: usize,
+}
+
+/// Decode the base mip, sampling it when it is larger than `max_side` on either
+/// axis. Colour maps that large exist (an 8192x8192 BC7 atlas is 64 MB) and
+/// decoding them in full costs far more than the thumbnail they feed.
+pub fn decode_dds_capped(bytes: &[u8], max_side: usize) -> AppResult<DecodedDds> {
     let header = dds::parse(bytes).map_err(AppError::Texture)?;
     let DdsHeader {
-        width,
-        height,
+        mut width,
+        mut height,
         format,
         data_offset,
         ..
@@ -41,6 +64,8 @@ pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
     let data = bytes
         .get(data_offset..)
         .ok_or_else(|| AppError::Texture("DDS file contains no pixel data.".to_string()))?;
+
+    let stride = width.max(height).div_ceil(max_side.max(1));
 
     if format.is_compressed() {
         let blocks_x = width.div_ceil(4);
@@ -54,8 +79,21 @@ pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
             )));
         }
 
+        // Sampling keeps the decoded image whole: the gathered blocks are
+        // contiguous, so the decoder sees a smaller image of the same shape.
+        let sampled;
+        let source: &[u8] = if stride > 1 {
+            let (blocks, kept_x, kept_y) =
+                subsample(&data[..required], blocks_x, blocks_y, format.block_bytes(), stride);
+            sampled = blocks;
+            width = kept_x * 4;
+            height = kept_y * 4;
+            &sampled
+        } else {
+            &data[..required]
+        };
+
         let mut pixels = vec![0u32; width * height];
-        let source = &data[..required];
 
         let result = match format {
             DdsFormat::Bc1 => texture2ddecoder::decode_bc1(source, width, height, &mut pixels),
@@ -85,10 +123,13 @@ pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
             rgba.push(((pixel >> 24) & 0xFF) as u8);
         }
 
-        return Ok(DecodedTexture {
-            width,
-            height,
-            rgba,
+        return Ok(DecodedDds {
+            texture: DecodedTexture {
+                width,
+                height,
+                rgba,
+            },
+            stride,
         });
     }
 
@@ -106,15 +147,26 @@ pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
         )));
     }
 
+    let sampled_pixels;
+    let source: &[u8] = if stride > 1 {
+        let (pixels, kept_x, kept_y) = subsample(data, width, height, pixel_bytes, stride);
+        sampled_pixels = pixels;
+        width = kept_x;
+        height = kept_y;
+        &sampled_pixels
+    } else {
+        data
+    };
+
     let mut rgba = vec![0u8; width * height * 4];
 
     for index in 0..width * height {
         let offset = index * pixel_bytes;
-        let pixel = &data[offset..offset + pixel_bytes];
+        let pixel = &source[offset..offset + pixel_bytes];
 
         let (red, green, blue, alpha) = match format {
             DdsFormat::Rgba8 => (pixel[0], pixel[1], pixel[2], pixel[3]),
-            DdsFormat::Bgra8 => (pixel[2], pixel[1], pixel[0], 0xFF),
+            DdsFormat::Bgra8 => (pixel[2], pixel[1], pixel[0], pixel[3]),
             DdsFormat::Masked {
                 bits,
                 red,
@@ -153,11 +205,39 @@ pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
         rgba[index * 4 + 3] = alpha;
     }
 
-    Ok(DecodedTexture {
-        width,
-        height,
-        rgba,
+    Ok(DecodedDds {
+        texture: DecodedTexture {
+            width,
+            height,
+            rgba,
+        },
+        stride,
     })
+}
+
+/// Copy every `stride`-th block (compressed) or pixel (uncompressed) out of a
+/// level, so an oversized source decodes into a smaller image of the same
+/// shape. `element` is the block or pixel size in bytes; `count_x`/`count_y`
+/// are the level's block or pixel counts.
+fn subsample(
+    data: &[u8],
+    count_x: usize,
+    count_y: usize,
+    element: usize,
+    stride: usize,
+) -> (Vec<u8>, usize, usize) {
+    let kept_x = count_x.div_ceil(stride);
+    let kept_y = count_y.div_ceil(stride);
+    let mut out = Vec::with_capacity(kept_x * kept_y * element);
+
+    for y in (0..count_y).step_by(stride) {
+        for x in (0..count_x).step_by(stride) {
+            let start = (y * count_x + x) * element;
+            out.extend_from_slice(&data[start..start + element]);
+        }
+    }
+
+    (out, kept_x, kept_y)
 }
 
 /// Pull one channel out of a packed pixel using its DDS mask.
@@ -200,23 +280,38 @@ fn downscale(width: usize, height: usize, rgba: &[u8], max_side: usize) -> (usiz
             let x_start = (target_x as f32 * x_ratio).floor() as usize;
             let x_end = (((target_x + 1) as f32 * x_ratio).ceil() as usize).min(width);
 
-            let mut sums = [0u32; 4];
-            let mut samples = 0u32;
+            // Coverage weighting: sum rgb * alpha, then divide by the summed
+            // alpha. Cutout atlases (hair, lace) store fully transparent black
+            // in the texels around their islands; a plain channel average would
+            // pull those black texels into the edge colour and paint a dark
+            // fringe over every cutout. Weighting by alpha keeps the edge texel
+            // the colour of the geometry that actually covers it, while a fully
+            // opaque block averages exactly as before.
+            let mut sums = [0u64; 3];
+            let mut sum_alpha = 0u64;
+            let mut samples = 0u64;
 
             for y in y_start..y_end.max(y_start + 1) {
                 for x in x_start..x_end.max(x_start + 1) {
                     let offset = (y.min(height - 1) * width + x.min(width - 1)) * 4;
-                    for channel in 0..4 {
-                        sums[channel] += rgba[offset + channel] as u32;
+                    let alpha = u64::from(rgba[offset + 3]);
+                    for (channel, sum) in sums.iter_mut().enumerate() {
+                        *sum += u64::from(rgba[offset + channel]) * alpha;
                     }
+                    sum_alpha += alpha;
                     samples += 1;
                 }
             }
 
             let samples = samples.max(1);
             let target = (target_y * target_width + target_x) * 4;
-            for channel in 0..4 {
-                out[target + channel] = (sums[channel] / samples) as u8;
+            out[target + 3] = (sum_alpha / samples) as u8;
+            for (channel, sum) in sums.iter().enumerate() {
+                out[target + channel] = if sum_alpha == 0 {
+                    0
+                } else {
+                    (sum / sum_alpha) as u8
+                };
             }
         }
     }
@@ -317,6 +412,81 @@ mod tests {
     }
 
     #[test]
+    fn subsamples_sources_above_the_decode_cap() {
+        // A 32x32 DXT1 is 8x8 blocks; each block gets a colour that names its
+        // own position, so the kept blocks are identifiable in the output.
+        let mut body = Vec::new();
+        for by in 0..8u16 {
+            for bx in 0..8u16 {
+                let colour = (bx << 11) | (by << 5);
+                body.extend(bc1_block(colour, colour));
+            }
+        }
+        let dds = dds_with(*b"DXT1", 32, 32, body);
+
+        let full = decode_dds_capped(&dds, 64).expect("decode");
+        assert_eq!(full.stride, 1);
+        assert_eq!((full.texture.width, full.texture.height), (32, 32));
+
+        // Cap of 8: every fourth block survives, so a 2x2 block grid.
+        let sampled = decode_dds_capped(&dds, 8).expect("decode");
+        assert_eq!(sampled.stride, 4);
+        assert_eq!((sampled.texture.width, sampled.texture.height), (8, 8));
+
+        let channel = |decoded: &DecodedTexture, x: usize, y: usize| {
+            let offset = (y * decoded.width + x) * 4;
+            [decoded.rgba[offset], decoded.rgba[offset + 1]]
+        };
+        // Kept block (0,0) is source block (0,0); kept block (1,0) is source
+        // block (4,0), which starts at source x = 16.
+        assert_eq!(
+            channel(&sampled.texture, 0, 0),
+            channel(&full.texture, 0, 0)
+        );
+        assert_eq!(
+            channel(&sampled.texture, 4, 0),
+            channel(&full.texture, 16, 0)
+        );
+        assert_eq!(
+            channel(&sampled.texture, 0, 4),
+            channel(&full.texture, 0, 16)
+        );
+        // Not a nearest-pixel grab: the sampled block still decodes as a block.
+        assert_ne!(
+            channel(&sampled.texture, 0, 0),
+            channel(&sampled.texture, 4, 0)
+        );
+    }
+
+    #[test]
+    fn keeps_bgra_alpha_and_x8_opaque() {
+        let masks = |alpha: u32| {
+            let mut bytes = dds_with([0, 0, 0, 0], 1, 1, Vec::new());
+            bytes[88..92].copy_from_slice(&32u32.to_le_bytes());
+            bytes[92..96].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+            bytes[96..100].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+            bytes[100..104].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+            bytes[104..108].copy_from_slice(&alpha.to_le_bytes());
+            bytes
+        };
+
+        // B8G8R8A8: byte order B,G,R,A — the alpha byte is the cutout mask that
+        // keeps hair and lace from rendering as solid cards.
+        let mut bgra = masks(0xFF00_0000);
+        bgra.extend_from_slice(&[0, 0, 255, 64]);
+        assert_eq!(
+            decode_dds(&bgra).expect("decode").rgba,
+            vec![255, 0, 0, 64]
+        );
+
+        // B8G8R8X8: no alpha mask, so the fourth byte is padding. A zero there
+        // must not punch a hole through the part.
+        let mut x8 = masks(0);
+        x8.extend_from_slice(&[0, 0, 255, 0]);
+        assert_eq!(decode_dds(&x8).expect("decode").rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
     fn decodes_bc1_blocks_to_rgba() {
         // 0xF800 is pure red in RGB565, 0x001F pure blue.
         let dds = dds_with(*b"DXT1", 4, 4, bc1_block(0xF800, 0x001F));
@@ -341,6 +511,28 @@ mod tests {
         assert_eq!((width, height), (1, 1));
         // 255 / 4 samples, truncated.
         assert_eq!(scaled, vec![63, 63, 63, 255]);
+    }
+
+    #[test]
+    fn does_not_darken_colour_with_transparent_texels() {
+        // One opaque red texel, three transparent black ones — the layout of a
+        // cutout island edge. The colour must stay red instead of being dragged
+        // to a dark fringe by the invisible texels.
+        let rgba = vec![255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (width, height, scaled) = downscale(2, 2, &rgba, 1);
+
+        assert_eq!((width, height), (1, 1));
+        // Coverage is a quarter, so alpha is 63, but the colour is unweighted.
+        assert_eq!(scaled, vec![255, 0, 0, 63]);
+    }
+
+    #[test]
+    fn a_fully_transparent_block_stays_black() {
+        let rgba = vec![255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0];
+        let (_, _, scaled) = downscale(2, 2, &rgba, 1);
+
+        // No division by zero, and no colour invented where nothing covers.
+        assert_eq!(scaled, vec![0, 0, 0, 0]);
     }
 
     #[test]

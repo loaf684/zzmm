@@ -118,6 +118,24 @@ Preview textures whose alpha channel contains values below 245 are flagged
 `alphaTest = 0.5` when the part has UVs. This keeps hair, lace, and cutout
 clothing from rendering as opaque cards without tinting the opaque parts.
 
+Uncompressed `B8G8R8A8` colour maps keep their fourth byte as alpha for exactly
+this reason; the `B8G8R8X8` forms, whose fourth byte is padding, and any mask
+set without an alpha channel decode as opaque.
+
+The preview downscale averages colour weighted by alpha coverage, so the fully
+transparent black texels around a cutout island no longer drag the island's edge
+colour towards black (which read as a dark fringe on hair and lace).
+
+## Decode cost
+
+One colour map is decoded and PNG-encoded once per preview, however many
+sub-draws bind it, and a source taller or wider than 4096 px is decoded from a
+sampled block grid (every second 4x4 block) before the box filter. Both matter
+in practice: an 8192x8192 BC7 atlas costs about 29 s per full decode in the
+pure-Rust decoder, and one installed mod binds three of them plus 2048 px maps
+to twenty-one parts — 428 s per preview before, 23 s after. The preview itself
+is capped at 1024 px, so the extra source resolution could never be shown.
+
 ## Compatibility behaviors
 
 - **Multiple structures:** resource sections, `CommandList` includes, `ref`/
