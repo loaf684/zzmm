@@ -224,7 +224,7 @@ fn build_preview(
                             .as_deref()
                             .unwrap_or_default()
                             .to_ascii_lowercase()
-                        && existing.base_dir == texture.base_dir
+                        && existing.scope_dir() == texture.scope_dir()
                 }
             }
         });
@@ -285,7 +285,9 @@ fn build_preview(
         } else {
             1
         };
-        let in_root = resource.base_dir.as_deref() == Some(root.as_path());
+        // A resource declared by the INI at the mod root, or found by the
+        // folder scan there, breaks a tie between two same-named copies.
+        let in_root = resource.scope_dir() == Some(root.as_path());
         (tier, !in_root)
     };
 
@@ -541,7 +543,7 @@ fn build_preview(
             let piece_scope = piece
                 .index_resource
                 .as_ref()
-                .and_then(|resource| resource.base_dir.as_deref());
+                .and_then(|resource| resource.scope_dir());
 
             let mut texture_match = if let Some(name) = piece.texture.as_deref() {
                 // This sub-draw's own binding is authoritative: it says exactly
@@ -1133,7 +1135,9 @@ fn index_rank(
     } else {
         1
     };
-    let root_rank = if resource.base_dir.as_deref() == Some(root) {
+    // The IB declared by the INI at the mod root outranks one from a sub-INI
+    // when both describe the same component.
+    let root_rank = if resource.scope_dir() == Some(root) {
         0
     } else {
         1
@@ -1285,7 +1289,7 @@ fn load_texture(
 
     // The INI folder that submitted this draw, used to disambiguate resource
     // names that several sub-INIs redeclare with different files.
-    let texture_scope = index.and_then(|index| index.base_dir.as_deref());
+    let texture_scope = index.and_then(|index| index.scope_dir());
 
     let ib_core = index
         .map(|index| resources::component_core(&index.section))
@@ -1509,7 +1513,7 @@ fn named_resource<'a>(
         if let Some(chosen) = candidates.iter().copied().find(|texture| {
             texture.filename.is_some()
                 && (texture.section.eq_ignore_ascii_case(name) || texture.lower_stem() == name)
-                && texture.base_dir.as_deref() == Some(scope)
+                && texture.scope_dir() == Some(scope)
         }) {
             return Some(chosen);
         }
@@ -2912,6 +2916,14 @@ mod resource_path_tests {
         mods
     }
 
+    fn texture(section: &str, filename: &str) -> IniResource {
+        IniResource {
+            section: section.to_string(),
+            filename: Some(filename.to_string()),
+            ..IniResource::default()
+        }
+    }
+
     #[test]
     fn a_relative_path_resolves_inside_the_declaring_inis_folder() {
         // Both variants ship the same file names; only the declared variant's
@@ -3311,6 +3323,200 @@ mod resource_path_tests {
             "the root-level same-named file must not stand in for the missing path"
         );
 
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn the_mod_root_ini_wins_a_position_tiebreak() {
+        // Two INIs declare the same component, so one position is kept. The
+        // sub-INI sorts first, so only the "declared by the mod-root INI"
+        // tiebreak can pick the root one: its folder, not its file path, is
+        // what makes it the primary declaration.
+        let mods = temp_mods("root-tiebreak");
+        let root = mods.join("RootTieMod");
+        std::fs::create_dir_all(root.join("Root")).expect("root folder");
+        std::fs::create_dir_all(root.join("aaa/Sub")).expect("sub folder");
+        std::fs::write(root.join("Root/BodyPosition.buf"), vertex_buffer(6)).expect("root vb");
+        std::fs::write(root.join("aaa/Sub/BodyPosition.buf"), vertex_buffer(3)).expect("sub vb");
+        std::fs::write(
+            root.join("mod.ini"),
+            "[ResourceRootBodyPosition]\r\n\
+             filename = Root/BodyPosition.buf\r\n\
+             stride = 40\r\n",
+        )
+        .expect("root ini");
+        std::fs::write(
+            root.join("aaa/other.ini"),
+            "[ResourceSubBodyPosition]\r\n\
+             filename = Sub/BodyPosition.buf\r\n\
+             stride = 40\r\n",
+        )
+        .expect("sub ini");
+
+        let preview = build_preview(&mods, "RootTieMod", None).expect("preview");
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(
+            preview.parts[0].vertex_count, 6,
+            "the mod-root INI's copy must win the tiebreak"
+        );
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn the_mod_root_ini_wins_an_index_tiebreak() {
+        // Same component from a sub-INI (sorts first by section name) and from
+        // the mod-root INI: the root declaration must be the surviving plan.
+        let root = Path::new("/mods/RankMod");
+        let sub = root.join("Sub");
+        let resource = |section: &str, filename: &str, folder: &Path, ini: &Path| IniResource {
+            section: section.to_string(),
+            filename: Some(filename.to_string()),
+            format: Some("DXGI_FORMAT_R32_UINT".to_string()),
+            base_dir: Some(ini.to_path_buf()),
+            resolve_dir: Some(folder.to_path_buf()),
+            ..IniResource::default()
+        };
+        let buffers = vec![
+            IniResource {
+                section: "ResourceBodyPosition".to_string(),
+                filename: Some("BodyPosition.buf".to_string()),
+                stride: Some(40),
+                base_dir: Some(root.join("mod.ini")),
+                resolve_dir: Some(root.to_path_buf()),
+                ..IniResource::default()
+            },
+            resource("ResourceBodyIBA", "BodyIB.ib", &sub, &sub.join("other.ini")),
+            resource("ResourceBodyIBZ", "BodyIB.ib", root, &root.join("mod.ini")),
+        ];
+
+        let plans = select_index_plan(
+            root,
+            &buffers,
+            "body",
+            "ResourceBodyPosition",
+            &Harvest::default(),
+        );
+
+        assert_eq!(plans.len(), 1, "{:?}", plans.len());
+        assert_eq!(
+            plans[0].resource.section, "ResourceBodyIBZ",
+            "the mod-root INI's index buffer must win the tiebreak"
+        );
+    }
+
+    #[test]
+    fn a_texture_scope_prefers_the_draws_own_folder() {
+        // Both sub-INIs redeclare `Resource_Body_Diffuse`; the draw comes from
+        // `Seed`, so its folder's definition must win even though `Funnel`
+        // sorts first. The scope is a folder, not an INI file path.
+        let root = Path::new("/mods/ScopeMod");
+        let seed = root.join("Seed");
+        let funnel = root.join("Funnel");
+
+        let mut funnel_body = texture("Resource_Body_Diffuse", "Fuyou.dds");
+        funnel_body.resolve_dir = Some(funnel);
+        let mut seed_body = texture("Resource_Body_Diffuse", "Tex\\body.dds");
+        seed_body.resolve_dir = Some(seed.clone());
+        let visible = vec![&funnel_body, &seed_body];
+
+        let index = IniResource {
+            section: "ResourceYuzuhaSkinAIB".to_string(),
+            resolve_dir: Some(seed.clone()),
+            ..IniResource::default()
+        };
+
+        let chosen = named_resource(&visible, "resource_body_diffuse", index.scope_dir())
+            .expect("same-folder definition");
+        assert_eq!(chosen.filename.as_deref(), Some("Tex\\body.dds"));
+    }
+
+    #[cfg(windows)]
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    fn make_dir_link(_link: &Path, _target: &Path) -> bool {
+        false
+    }
+
+    #[test]
+    fn a_directory_link_out_of_the_mod_is_refused() {
+        // The mod contains a directory link to a folder outside itself that
+        // holds a real buffer. Lexically the path is inside the mod, so only
+        // the canonical containment check can refuse it.
+        let mods = temp_mods("dir-link");
+        let root = mods.join("LinkMod");
+        std::fs::create_dir_all(&root).expect("mod dir");
+        let outside = mods.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("LeakedPosition.buf"), vertex_buffer(9)).expect("outside vb");
+        std::fs::write(root.join("HeadPosition.buf"), vertex_buffer(3)).expect("head vb");
+        std::fs::write(root.join("Head.ib"), index_buffer(&[0, 1, 2])).expect("head ib");
+        std::fs::write(
+            root.join("link.ini"),
+            "[ResourceLeakedPosition]\r\n\
+             filename = linked/LeakedPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadPosition]\r\n\
+             filename = HeadPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadIB]\r\n\
+             filename = Head.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideLeaked]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceLeakedPosition\r\n\
+             draw = 9, 0\r\n\
+             \r\n\
+             [TextureOverrideHead]\r\n\
+             hash = def\r\n\
+             vb0 = ResourceHeadPosition\r\n\
+             ib = ResourceHeadIB\r\n\
+             drawindexed = 3, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        if !make_dir_link(&root.join("linked"), &outside) {
+            eprintln!("skipping: this environment cannot create a directory link");
+            let _ = std::fs::remove_dir_all(&mods);
+            return;
+        }
+
+        let preview = build_preview(&mods, "LinkMod", None).expect("preview");
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("LeakedPosition.buf was not found on disk")),
+            "a linked file outside the mod must be reported: {:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "Head");
+        assert!(
+            preview.parts.iter().all(|part| part.vertex_count != 9),
+            "a file reached through a link out of the mod must never be read"
+        );
+
+        let _ = std::fs::remove_dir(&root.join("linked"));
         let _ = std::fs::remove_dir_all(&mods);
     }
 }

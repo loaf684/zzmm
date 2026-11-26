@@ -321,8 +321,10 @@ archive.
   relative `filename` resolves against the folder of the INI that declares it
   (3DMigoto semantics, also accepted as the same path from the mod root); a
   path-qualified name never resolves by bare name, and every resolved file must
-  be a real file inside the mod folder. `IniResource::base_dir` keeps the
-  caller's INI path for ranking and texture-scope comparisons.
+  be a real file inside the mod folder. Variant ranking, the "declared by the
+  mod-root INI" tiebreak and texture scopes all compare that resolving folder
+  (`IniResource::scope_dir`), while `base_dir` keeps the caller's INI path for
+  provenance and duplicate checks.
 - When the INI is incomplete, ZZZ's default layout is used and **validated
   against the file sizes**: position stride 40 (falling back to
   36/32/24/20/16/12), texcoord stride 20 (or whichever stride yields exactly the
