@@ -1488,6 +1488,22 @@ fn load_texture(
         .and_then(|preferred| named_resource(&visible, preferred, texture_scope))
         .filter(|chosen| !is_data_map(&chosen.lower_stem()));
 
+    // A mod that binds a diffuse per index buffer is telling us exactly which
+    // atlas paints which submesh. `component_core` collapses A/B/C as variants
+    // of one component, so a buffer with no binding of its own must not inherit
+    // a sibling's atlas through that core: in game those draws are painted by
+    // the game's own texture (S11's bag, S11BodyB, is exactly this case, and
+    // borrowing painted it with the body sheet).
+    let mod_binds_per_ib = harvest.is_some_and(|harvest| !harvest.index_texture.is_empty());
+    let own_ib_bound = index.is_some_and(|resource| {
+        harvest.is_some_and(|harvest| {
+            harvest
+                .index_texture
+                .contains_key(&resource.section.to_ascii_lowercase())
+        })
+    });
+    let borrows_sibling_atlas = mod_binds_per_ib && !own_ib_bound;
+
     // 1. A binding made by the IB's own section is trustworthy even when the
     //    texture name does not contain the component (Yuzuha's Tenga skin).
     if source_confident {
@@ -1519,7 +1535,7 @@ fn load_texture(
     // 4. A texture override (`TextureOverride…Diffuse`) supplies the colour
     //    map for the component named in its section. This covers `this = …`
     //    texture swaps, which have no mesh binding at all.
-    if let Some(harvest) = harvest {
+    if let Some(harvest) = harvest.filter(|_| !borrows_sibling_atlas) {
         let mut cores: Vec<String> = Vec::new();
         if !ib_core.is_empty() {
             cores.push(ib_core.clone());
@@ -1564,7 +1580,7 @@ fn load_texture(
             }
         }
 
-        if let Some(harvest) = harvest {
+        if let Some(harvest) = harvest.filter(|_| !borrows_sibling_atlas) {
             if let Some((_, target)) = harvest.links.iter().find(|(mesh, _)| {
                 resources::cores_match(&resources::component_core(mesh), &ib_core)
             }) {
@@ -1578,15 +1594,19 @@ fn load_texture(
     }
 
     // 6. A colour map whose name mentions this component.
-    let matching: Vec<&IniResource> = visible
-        .iter()
-        .copied()
-        .filter(|texture| {
-            !key.is_empty()
-                && !is_data_map(&texture.lower_stem())
-                && texture.lower_stem().contains(key)
-        })
-        .collect();
+    let matching: Vec<&IniResource> = if borrows_sibling_atlas {
+        Vec::new()
+    } else {
+        visible
+            .iter()
+            .copied()
+            .filter(|texture| {
+                !key.is_empty()
+                    && !is_data_map(&texture.lower_stem())
+                    && texture.lower_stem().contains(key)
+            })
+            .collect()
+    };
 
     let chosen = matching
         .iter()
@@ -2644,6 +2664,74 @@ drawindexed = 3, 0, 0
             "{:?}",
             preview.warnings
         );
+    }
+
+    #[test]
+    fn a_slice_with_no_binding_does_not_inherit_a_siblings_atlas() {
+        // S11 shape: the body IB binds the mod's atlas, the bag IB (a separate
+        // slice, its own match_first_index) binds none because in game that
+        // draw keeps the game's own texture. `component_core` collapses A/B as
+        // variants of one component, so the bag used to be painted with the body
+        // sheet - the bag looked like skin and suit fabric.
+        let scratch = Scratch::new("Slices");
+        scratch.write_text(
+            "Slices.ini",
+            "[ResourceBodyPosition]\nfilename = BodyPosition.buf\nstride = 40\n\n\
+             [ResourceBodyAIB]\nfilename = BodyA.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceBodyBIB]\nfilename = BodyB.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [ResourceBodyTexcoord]\nfilename = BodyTexcoord.buf\nstride = 20\n\n\
+             [ResourceBodyADiffuse]\nfilename = BodyADiffuse.dds\n\n\
+             [TextureOverrideBodyA]\nmatch_first_index = 0\nib = ResourceBodyAIB\n\
+             vb1 = ResourceBodyTexcoord\n\
+             Resource\\ZZMI\\Diffuse = ref ResourceBodyADiffuse\ndrawindexed = 3, 0, 0\n\n\
+             [TextureOverrideBodyB]\nmatch_first_index = 3\nib = ResourceBodyBIB\n\
+             vb1 = ResourceBodyTexcoord\n; drawindexed = 3, 0, 0\n",
+        );
+        scratch.write(
+            "BodyPosition.buf",
+            &position_buf(&[
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]),
+        );
+        let mut texcoord = Vec::new();
+        for uv in [[0.0f32, 0.0f32], [0.5, 0.25], [1.0, 1.0], [0.25, 0.75]] {
+            for value in uv {
+                texcoord.extend_from_slice(&value.to_le_bytes());
+            }
+            texcoord.extend_from_slice(&[0u8; 12]);
+        }
+        scratch.write("BodyTexcoord.buf", &texcoord);
+        scratch.write("BodyA.ib", &u16_indices(&[0, 1, 2]));
+        scratch.write("BodyB.ib", &u16_indices(&[1, 2, 3]));
+        scratch.write("BodyADiffuse.dds", &bgra_dds(&[[255, 0, 0, 255]; 4]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 2, "{:?}", preview.parts);
+
+        let body = preview
+            .parts
+            .iter()
+            .find(|part| part.name.starts_with("BodyA"))
+            .expect("body part");
+        assert!(body.texture.is_some(), "the bound slice keeps its atlas");
+        assert_eq!(body.material.as_deref(), Some("BodyADiffuse.dds"));
+
+        let bag = preview
+            .parts
+            .iter()
+            .find(|part| part.name.starts_with("BodyB"))
+            .expect("unbound slice");
+        assert!(
+            bag.texture.is_none(),
+            "the unbound slice must not borrow the body sheet"
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no diffuse texture is shipped")));
     }
 
     #[test]
@@ -4041,5 +4129,4 @@ mod resource_path_tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 }
-
 

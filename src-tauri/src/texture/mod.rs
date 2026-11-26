@@ -34,11 +34,6 @@ pub struct DecodedTexture {
     pub rgba: Vec<u8>,
 }
 
-/// Decode the base mip of a DDS file to RGBA8.
-pub fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
-    decode_dds_capped(bytes, MAX_DECODE_SIDE).map(|decoded| decoded.texture)
-}
-
 /// A decoded base mip plus how coarsely it had to be sampled.
 #[derive(Debug, Clone)]
 pub struct DecodedDds {
@@ -371,11 +366,21 @@ pub fn load_preview_texture(path: &Path) -> AppResult<PreviewTexture> {
 
     let bytes = fs::read(path)
         .map_err(|error| AppError::Texture(format!("{}: {error}", path.display())))?;
-    let decoded = decode_dds(&bytes)?;
+    let decoded = decode_dds_capped(&bytes, MAX_DECODE_SIDE)?;
+    if decoded.stride > 1 {
+        // Say so in the log: a subsampled atlas explains a softer preview than
+        // the file itself would give, without pretending the file was broken.
+        log::info!(
+            "{}: decoded every {}th block for the preview ({})",
+            path.display(),
+            decoded.stride,
+            "source above the 4096 px decode cap"
+        );
+    }
     let (width, height, rgba) = downscale(
-        decoded.width,
-        decoded.height,
-        &decoded.rgba,
+        decoded.texture.width,
+        decoded.texture.height,
+        &decoded.texture.rgba,
         PREVIEW_MAX_SIDE,
     );
     let has_alpha = uses_alpha(&rgba);
@@ -390,6 +395,10 @@ pub fn load_preview_texture(path: &Path) -> AppResult<PreviewTexture> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_dds(bytes: &[u8]) -> AppResult<DecodedTexture> {
+        decode_dds_capped(bytes, MAX_DECODE_SIDE).map(|decoded| decoded.texture)
+    }
 
     fn bc1_block(color0: u16, color1: u16) -> Vec<u8> {
         let mut bytes = Vec::new();
