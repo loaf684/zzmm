@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use serde::Serialize;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
@@ -64,6 +65,139 @@ pub async fn load_mod_preview(
 /// A parsed INI: its path relative to the mod root, its absolute path, and the
 /// lines that feed both the resource scan and the toggle harvest.
 type ParsedIni = (String, PathBuf, Vec<parser::IniLine>);
+
+/// What a save wrote, so the panel can say exactly which values the game will
+/// load and which toggles it could not place.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedToggles {
+    pub file: String,
+    pub backup: Option<String>,
+    pub written: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+/// Persist the preview's toggle choices where the loader reads them, so the
+/// game starts with the same outfit the preview shows.
+#[tauri::command]
+pub async fn save_preview_toggles(
+    state: State<'_, AppState>,
+    folder_name: String,
+    values: Vec<PreviewToggleValue>,
+) -> AppResult<SavedToggles> {
+    let mods = mods_dir(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        write_preview_toggles(&mods, &folder_name, &values)
+    })
+    .await
+    .map_err(|error| AppError::Task(error.to_string()))?
+}
+
+/// Write each value under the namespace of the INI that declares it:
+/// `$\mods\<folder>\<ini>\<var> = <value>` in `d3dx_user.ini`, which the
+/// loader reads back on the next start. Only variables this mod itself declares
+/// in `[Constants]` are written, and only numeric values, so a stale panel
+/// selection cannot invent a variable or push a text value into the file.
+fn write_preview_toggles(
+    mods: &Path,
+    folder_name: &str,
+    values: &[PreviewToggleValue],
+) -> AppResult<SavedToggles> {
+    let root = actions::mod_dir(mods, folder_name)?;
+
+    let mut dirs = vec![root.clone(), mods.to_path_buf()];
+    if let Some(parent) = mods.parent() {
+        dirs.push(parent.to_path_buf());
+        if let Some(grandparent) = parent.parent() {
+            dirs.push(grandparent.to_path_buf());
+        }
+    }
+    let user_ini = dirs
+        .iter()
+        .flat_map(|dir| ["d3dx_user.ini", "3DUser.ini"].map(|name| dir.join(name)))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            AppError::Preview(
+                "No d3dx_user.ini or 3DUser.ini was found next to the loader, so there is nowhere the game would read the saved values from."
+                    .to_string(),
+            )
+        })?;
+
+    // Only the INIs that declare a variable can name its namespace; a variable
+    // from a stale panel is reported, never written.
+    let mut parsed: Vec<(String, Vec<parser::IniLine>)> = Vec::new();
+    for (relative, path, _size) in collect_ini_files(&root)
+        .into_iter()
+        .filter(|(relative, _, _)| {
+            let name = relative
+                .rsplit('/')
+                .next()
+                .unwrap_or(relative)
+                .to_ascii_lowercase();
+            !is_ignored_ini_name(&name)
+        })
+        .take(MAX_INIS)
+    {
+        let Ok((content, _encoding)) = text::read(&path) else {
+            continue;
+        };
+        parsed.push((relative, parser::split_lines(&content)));
+    }
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for value in values {
+        let Some(number) = variants::numeric_literal(&value.value) else {
+            missing.push(value.name.clone());
+            continue;
+        };
+        let Some(relative) = parsed
+            .iter()
+            .find(|(_, lines)| variants::declares_constant(lines, &value.name))
+            .map(|(relative, _)| relative.clone())
+        else {
+            missing.push(value.name.clone());
+            continue;
+        };
+        entries.push((
+            variants::user_config_key(folder_name, &relative, &value.name),
+            number,
+        ));
+    }
+
+    if entries.is_empty() {
+        return Err(AppError::Preview(
+            "None of these toggles is declared by this mod's INI files, so nothing was saved."
+                .to_string(),
+        ));
+    }
+
+    let (content, encoding) = text::read(&user_ini)?;
+    let mut updated = content;
+    let mut written: Vec<String> = Vec::new();
+    for (key, value) in &entries {
+        if let Some(next) = variants::write_user_value(&updated, key, value) {
+            updated = next;
+            written.push(key.clone());
+        }
+    }
+
+    let backup = if written.is_empty() {
+        None
+    } else {
+        let backup = text::backup_once(&user_ini)?;
+        text::write_atomic(&user_ini, &text::encode(&updated, encoding))?;
+        backup
+    };
+
+    Ok(SavedToggles {
+        file: user_ini.display().to_string(),
+        backup,
+        written,
+        missing,
+    })
+}
 
 fn build_preview(
     mods: &Path,
@@ -465,62 +599,73 @@ fn build_preview(
                     if total == 0 {
                         // The section has explicit `drawindexed` lines but every
                         // one sits in a branch the saved toggle state does not
-                        // take. The game submits no geometry for this IB, so it
-                        // must not fall back to drawing the whole buffer.
+                        // take, or was commented out by the mod. The game
+                        // submits no geometry for this IB, so it must not fall
+                        // back to drawing the whole buffer.
                         continue;
                     }
+
                     let fits = ranges.iter().all(|range| {
                         (range.start as usize).saturating_add(range.count as usize) <= indices.len()
                     });
-                    if total > 0 && !fits {
+                    if !fits {
+                        // Dumps can declare more indices than the buffer holds
+                        // (S11 asks for 70221 of a 69273-index IB). The game
+                        // still draws the buffer, so render the part that
+                        // exists rather than hiding the whole mesh behind a
+                        // warning.
                         warnings.push(format!(
-                            "{label}: ignored draw ranges that do not fit the index buffer."
+                            "{label}: draw ranges ask for {total} indices but the index buffer holds {}; rendered the {} that fit.",
+                            indices.len(),
+                            total.min(indices.len())
                         ));
-                    } else if total > 0 {
-                        // Group the sub-draws by the colour map bound at each
-                        // draw. A section that swaps the diffuse mid-list (a
-                        // merged hair + cape) then yields one piece per
-                        // material instead of painting every range with the
-                        // first draw's texture.
-                        let mut groups: Vec<(Option<String>, Vec<u32>)> = Vec::new();
-                        let mut kept = 0usize;
-                        for range in ranges {
-                            let from = (range.start as usize).min(indices.len());
-                            let to = (from + range.count as usize).min(indices.len());
-                            kept += to - from;
-                            let slice = &indices[from..to];
-                            match groups
-                                .iter_mut()
-                                .find(|(texture, _)| texture == &range.texture)
-                            {
-                                Some((_, buffer)) => buffer.extend_from_slice(slice),
-                                None => groups.push((range.texture.clone(), slice.to_vec())),
-                            }
-                        }
-                        if kept < indices.len() {
-                            culled_tris += (indices.len() - kept) / 3;
-                        }
-
-                        let multiple = groups.len() > 1;
-                        for (texture, group_indices) in groups {
-                            let piece_label = if multiple {
-                                let tag = match texture.as_deref() {
-                                    Some(resource) => short_texture_tag(resource),
-                                    None => "original".to_string(),
-                                };
-                                format!("{base_label} [{tag}]")
-                            } else {
-                                base_label.clone()
-                            };
-                            pieces.push(RenderPiece {
-                                label: piece_label,
-                                indices: group_indices,
-                                index_resource: Some(plan.resource.clone()),
-                                texture,
-                            });
-                        }
-                        continue;
                     }
+
+                    // Group the sub-draws by the colour map bound at each draw.
+                    // A section that swaps the diffuse mid-list (a merged hair +
+                    // cape) then yields one piece per material instead of
+                    // painting every range with the first draw's texture.
+                    let mut groups: Vec<(Option<String>, Vec<u32>)> = Vec::new();
+                    let mut kept = 0usize;
+                    for range in ranges {
+                        let from = (range.start as usize).min(indices.len());
+                        let to = (from + range.count as usize).min(indices.len());
+                        kept += to - from;
+                        let slice = &indices[from..to];
+                        match groups
+                            .iter_mut()
+                            .find(|(texture, _)| texture == &range.texture)
+                        {
+                            Some((_, buffer)) => buffer.extend_from_slice(slice),
+                            None => groups.push((range.texture.clone(), slice.to_vec())),
+                        }
+                    }
+                    if kept < indices.len() {
+                        culled_tris += (indices.len() - kept) / 3;
+                    }
+
+                    let multiple = groups.len() > 1;
+                    for (texture, group_indices) in groups {
+                        if group_indices.is_empty() {
+                            continue;
+                        }
+                        let piece_label = if multiple {
+                            let tag = match texture.as_deref() {
+                                Some(resource) => short_texture_tag(resource),
+                                None => "original".to_string(),
+                            };
+                            format!("{base_label} [{tag}]")
+                        } else {
+                            base_label.clone()
+                        };
+                        pieces.push(RenderPiece {
+                            label: piece_label,
+                            indices: group_indices,
+                            index_resource: Some(plan.resource.clone()),
+                            texture,
+                        });
+                    }
+                    continue;
                 }
 
                 pieces.push(RenderPiece {
@@ -2227,6 +2372,96 @@ drawindexed = 3, 0, 0
     }
 
     #[test]
+    fn clamps_a_draw_that_asks_for_more_indices_than_the_buffer_holds() {
+        // S11 shape: `drawindexed = 70221` against a 69273-index dump. The game
+        // still draws the buffer, so the preview must render the part that
+        // exists instead of dropping the whole mesh.
+        let scratch = Scratch::new("Clamped");
+        scratch.write_text(
+            "Clamped.ini",
+            "[ResourceClampedPosition]\nfilename = ClampedPosition.buf\nstride = 40\n\n\
+             [ResourceClampedIB]\nfilename = Clamped.ib\nformat = DXGI_FORMAT_R16_UINT\n\n\
+             [TextureOverrideClamped]\nib = ResourceClampedIB\ndrawindexed = 9, 0, 0\n",
+        );
+        scratch.write(
+            "ClampedPosition.buf",
+            &position_buf(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        );
+        // Three indices where the INI asks for nine.
+        scratch.write("Clamped.ib", &u16_indices(&[0, 1, 2]));
+
+        let preview = scratch.build().expect("preview");
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].triangle_count, 1);
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rendered the 3 that fit")),
+            "{:?}",
+            preview.warnings
+        );
+    }
+
+    #[test]
+    fn saves_toggle_values_where_the_game_reads_them() {
+        let mods = std::env::temp_dir().join(format!("zzmm-save-{}", std::process::id()));
+        let root = mods.join("SaveMod");
+        let _ = std::fs::remove_dir_all(&mods);
+        fs::create_dir_all(&root).expect("mod dir");
+        fs::write(
+            root.join("SaveMod.ini"),
+            "[Constants]\n\
+             global persist $jacket = 1\n\
+             \n\
+             [TextureOverrideBody]\n\
+             if $jacket == 1\n\
+             \tvb0 = ResourceJacketOn\n\
+             endif\n",
+        )
+        .expect("ini");
+        // The loader's user state, with another mod's value that must survive.
+        fs::write(
+            mods.join("d3dx_user.ini"),
+            "; header\n[Constants]\n$\\mods\\other\\x.ini\\jacket = 1\n",
+        )
+        .expect("user ini");
+
+        let saved = write_preview_toggles(
+            &mods,
+            "SaveMod",
+            &[
+                PreviewToggleValue {
+                    name: "Jacket".to_string(),
+                    value: "0".to_string(),
+                },
+                PreviewToggleValue {
+                    name: "NotMine".to_string(),
+                    value: "1".to_string(),
+                },
+            ],
+        )
+        .expect("saved");
+
+        assert_eq!(saved.written.len(), 1, "{saved:?}");
+        assert_eq!(saved.missing, vec!["NotMine".to_string()]);
+        assert!(saved.backup.is_some(), "a save keeps a backup");
+
+        let content = fs::read_to_string(mods.join("d3dx_user.ini")).expect("read");
+        assert!(
+            content.contains("$\\mods\\savemod\\savemod.ini\\jacket = 0"),
+            "{content}"
+        );
+        assert!(
+            content.contains("$\\mods\\other\\x.ini\\jacket = 1"),
+            "another mod's line survives"
+        );
+        assert!(content.starts_with("; header"), "comments survive");
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
     fn ignores_manager_backups_that_would_duplicate_geometry() {
         let scratch = basic_mod();
         // Same INI under a backup name: stacking it would render the triangle
@@ -3621,4 +3856,5 @@ mod resource_path_tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 }
+
 

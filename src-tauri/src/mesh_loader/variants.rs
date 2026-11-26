@@ -303,6 +303,86 @@ pub fn read_toggle_state(dirs: &[PathBuf], folder_name: &str) -> ToggleState {
     state
 }
 
+/// True when this INI declares `$name` in a `[Constants]` block, i.e. it is the
+/// file whose namespace the loader persists the variable under.
+pub fn declares_constant(lines: &[IniLine], name: &str) -> bool {
+    let wanted = name.trim_start_matches('$').to_ascii_lowercase();
+    for section in parser::sections(lines) {
+        if !section.name.eq_ignore_ascii_case("constants") {
+            continue;
+        }
+        for index in section.header + 1..section.end {
+            let text = strip_comment(&lines[index].text);
+            let Some((lhs, _)) = split_assignment(&text) else {
+                continue;
+            };
+            if let Some(variable) = lhs.rsplit('$').next() {
+                if lhs.contains('$') && variable.trim().to_ascii_lowercase() == wanted {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The key 3DMigoto writes a persisted variable under: the loader's `\mods`
+/// prefix, the mod folder, the INI that declares it, then the variable.
+/// `$\mods\sunna\resources\sunna.ini\jacket = 1`
+pub fn user_config_key(folder: &str, ini_relative: &str, variable: &str) -> String {
+    let folder = folder.trim().to_ascii_lowercase().replace('/', "\\");
+    let ini = ini_relative.trim().to_ascii_lowercase().replace('/', "\\");
+    let variable = variable.trim().trim_start_matches('$').to_ascii_lowercase();
+    format!("$\\mods\\{folder}\\{ini}\\{variable}")
+}
+
+/// Set one persisted value in the loader's user-ini text, adding the line under
+/// `[Constants]` when it is not there yet. Returns `None` when nothing changed,
+/// so a save with no effective change does not rewrite the file.
+pub fn write_user_value(content: &str, key: &str, value: &str) -> Option<String> {
+    let wanted = key.to_ascii_lowercase();
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let mut replaced = false;
+
+    for line in &mut lines {
+        let Some((lhs, _)) = split_assignment(line) else {
+            continue;
+        };
+        if lhs.trim().to_ascii_lowercase() == wanted {
+            let next = format!("{key} = {value}");
+            if line.trim() == next {
+                return None;
+            }
+            *line = next;
+            replaced = true;
+            break;
+        }
+    }
+
+    if !replaced {
+        let entry = format!("{key} = {value}");
+        match lines
+            .iter()
+            .position(|line| line.trim().eq_ignore_ascii_case("[constants]"))
+        {
+            Some(header) => lines.insert(header + 1, entry),
+            None => {
+                if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push("[Constants]".to_string());
+                lines.push(entry);
+            }
+        }
+    }
+
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// `[Constants]` declarations: variables and their in-game default values.
 pub fn collect_defaults(lines: &[IniLine], state: &mut ToggleState) {
     for section in parser::sections(lines) {
@@ -487,6 +567,11 @@ pub fn harvest(lines: &[IniLine], state: &ToggleState) -> Harvest {
             let text = strip_comment(&lines[index].text);
             if !text.is_empty() {
                 settings.push(text.to_string());
+            } else if is_commented_out_draw(&lines[index].text) {
+                // `; drawindexed = 9123, 0, 0` is the author switching that
+                // draw off: the game submits nothing for the buffer, so the
+                // preview must not fall back to drawing the whole index buffer.
+                settings.push("drawindexed-disabled".to_string());
             }
         }
         sections.entry(lower).or_default().extend(settings);
@@ -644,6 +729,12 @@ fn walk(
                 }
                 if let Some(callee) = sections.get(&target) {
                     walk(callee, state, sections, true, visited, depth + 1, run, out);
+                }
+                continue;
+            }
+            "drawindexed-disabled" => {
+                if let Some(ib) = run.current_ib.clone() {
+                    run.drawn_ibs.insert(ib);
                 }
                 continue;
             }
@@ -1112,6 +1203,18 @@ struct Frame {
     active: bool,
 }
 
+/// True when the whole line is a comment whose first word is `drawindexed`,
+/// i.e. a draw the mod disabled on purpose.
+fn is_commented_out_draw(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix(';') else {
+        return false;
+    };
+    let (word, _) = split_word(rest.trim_start());
+    let lower = word.to_ascii_lowercase();
+    lower == "drawindexed" || lower.starts_with("drawindexed=")
+}
+
+/// Remove a trailing `;` comment from a settings line.
 fn strip_comment(line: &str) -> &str {
     let cut = line.find([';', '；']).unwrap_or(line.len());
     line[..cut].trim()
@@ -1861,6 +1964,48 @@ mod tests {
     }
 
     #[test]
+    fn writes_a_persisted_toggle_in_the_loaders_namespace() {
+        let key = user_config_key("Sunna RaceQueen", "resources\\Sunna.ini", "$jacket");
+        assert_eq!(key, "$\\mods\\sunna racequeen\\resources\\sunna.ini\\jacket");
+
+        let content = "; header\n[Constants]\n$\\mods\\other\\x.ini\\jacket = 1\n";
+        let updated = write_user_value(&content, &key, "0").expect("changed");
+        assert!(updated.contains("; header"), "keeps comments");
+        assert!(
+            updated.contains("$\\mods\\other\\x.ini\\jacket = 1"),
+            "keeps another mod's value"
+        );
+        assert!(
+            updated.contains(&format!("{key} = 0")),
+            "adds the value under [Constants]"
+        );
+
+        // Writing the same value again is a no-op, so a save does not rewrite
+        // the file for nothing.
+        assert!(write_user_value(&updated, &key, "0").is_none());
+
+        // An existing line is replaced in place, whatever its spacing.
+        let again = write_user_value(&updated, &key, "1").expect("changed");
+        assert!(again.contains(&format!("{key} = 1")));
+        assert!(!again.contains(&format!("{key} = 0")));
+    }
+
+    #[test]
+    fn finds_the_ini_that_declares_a_constant() {
+        let declaring = lines(
+            "[Constants]\r\n\
+             global persist $jacket = 1\r\n",
+        );
+        let other = lines(
+            "[Constants]\r\n\
+             global persist $hat = 0\r\n",
+        );
+        assert!(declares_constant(&declaring, "jacket"));
+        assert!(declares_constant(&declaring, "$Jacket"));
+        assert!(!declares_constant(&other, "jacket"));
+    }
+
+    #[test]
     fn harvest_signature_tracks_which_variant_is_drawn() {
         let ini = lines(
             "[TextureOverrideBody]\r\n\
@@ -2326,6 +2471,22 @@ mod tests {
         // Explicitly empty, not `None`: `None` means "no drawindexed at all,
         // draw the whole buffer", which would show the disabled variant.
         assert_eq!(harvest.draws_for("ResourceTopIB"), Some(&[][..]));
+    }
+
+    #[test]
+    fn a_commented_out_draw_marks_the_buffer_explicit() {
+        // S11's dump declares three IBs and switches two of the draws off with
+        // a comment. Those draws must read as explicitly empty, never as "no
+        // drawindexed at all", or the preview draws the whole buffer the game
+        // never submits.
+        let ini = lines(
+            "[TextureOverrideBody]\r\n\
+             ib = ResourceBodyIB\r\n\
+             ; drawindexed = 300, 0, 0\r\n",
+        );
+
+        let harvest = harvest(&ini, &state(&[]));
+        assert_eq!(harvest.draws_for("ResourceBodyIB"), Some(&[][..]));
     }
 
     #[test]

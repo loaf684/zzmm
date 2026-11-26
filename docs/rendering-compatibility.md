@@ -169,6 +169,14 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   replaced by another variant's file.
 - **Toggle state:** alternatives not drawn by the saved state are skipped and
   counted in the preview warnings.
+- **Truncated dumps:** a draw can ask for more indices than its buffer holds
+  (`S11Mod` asks for 70221 of a 69273-index IB). The game still draws the
+  buffer, so the preview clamps the range, renders the part that exists and
+  names the shortfall instead of hiding the whole mesh.
+- **Disabled draws:** `; drawindexed = ...` is the mod switching a draw off, so
+  the buffer is treated as explicitly range-driven with no ranges and the part
+  is omitted. Without that, the preview fell back to drawing the whole buffer
+  and stacked phantom geometry over `S11Mod`'s body.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
@@ -192,6 +200,18 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   that sweeps the atlas (`span >= 0.05` on both axes) and only then retries with
   a much lower floor (`0.001`). This fixes parts such as Ye's `0YE发带` and
   Dialyn's `DialynCable`, whose UVs were previously discarded.
+
+## Saving preview toggles
+
+`save_preview_toggles(folderName, values)` writes the chosen values into the
+loader's `d3dx_user.ini` (or `3DUser.ini`) so the game starts with the outfit
+the preview shows. Each value goes under the namespace of the INI that declares
+it — `$\mods\<folder>\<ini>\<variable> = <value>` — because the loader keys
+persisted variables by that path, not by name alone. Only variables the mod
+declares in `[Constants]` and only numeric values are written; anything else is
+reported back in `missing` rather than invented. The first write keeps a
+`d3dx_user.ini.bak` beside the file, and a save that changes nothing leaves the
+file untouched.
 
 ## Known limits
 
