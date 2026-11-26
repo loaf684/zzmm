@@ -720,14 +720,31 @@ fn apply_overrides(
 
 /// Candidate toggle variables and the numeric values the INI gives them,
 /// merged across every INI of the mod.
+///
+/// A variable is a candidate only when a `[Key*]` section binds it: the key
+/// editor's own notion of a user toggle. Internal flags (a `[Constants]`
+/// default, a `[Present]`-derived guard, a condition-only knob) can change the
+/// mesh too, but the user has no in-game control for them, so they must never
+/// appear as a preview control. Values still come from every assignment and
+/// comparison in the mod, so a key's option list can live apart from the
+/// `[Constants]` default it overrides.
 fn toggle_candidates(
     parsed: &[ParsedIni],
     state: &ToggleState,
 ) -> BTreeMap<String, BTreeSet<String>> {
+    let declared: BTreeSet<String> = parsed
+        .iter()
+        .flat_map(|(_, _, lines)| variants::key_toggle_variables(lines))
+        .collect();
+
     let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (_, _, lines) in parsed {
-        for name in variants::condition_variables(lines) {
-            let values = candidates.entry(name.clone()).or_default();
+    for name in parsed
+        .iter()
+        .flat_map(|(_, _, lines)| variants::condition_variables(lines))
+        .filter(|name| declared.contains(name))
+    {
+        let values = candidates.entry(name.clone()).or_default();
+        for (_, _, lines) in parsed {
             values.extend(variants::candidate_values(lines, &name));
         }
     }
@@ -781,9 +798,13 @@ fn probe_state(
 /// Variables whose value actually changes what the preview draws.
 ///
 /// A candidate is a `$variable` used in an `if` / `elif` / `else if` condition
-/// with at least two known numeric values. It is exposed only when at least one
-/// alternative value produces a different harvest fingerprint than the state
-/// the model is rendered with, so a control appears exactly when it changes the
+/// with at least two known numeric values *and* declared by a `$name = ...`
+/// assignment inside a `[Key*]` section. Internal/derived flags (a
+/// `[Constants]` default, `[Present]` guards, condition-only knobs) change the
+/// mesh too but are not in-game controls, so they are never offered. Beyond
+/// that gate, a candidate is exposed only when at least one alternative value
+/// produces a different harvest fingerprint than the state the model is
+/// rendered with, so a control appears exactly when it changes the
 /// mesh, its parts, the colour map resolved for a part/index buffer, or the draw
 /// ranges the game submits. Data maps (normal/light/glow/...) and null
 /// placeholders are not part of the fingerprint, so a toggle that only rebinds
@@ -2153,6 +2174,10 @@ mod texture_tests {
             "[Constants]\r\n\
              global persist $hide_hat = 0\r\n\
              global persist $unused = 0\r\n\
+             [KeyHideHat]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $hide_hat = 0, 1\r\n\
              [TextureOverrideHat]\r\n\
              if $hide_hat == 0\r\n\
              \tvb0 = ResourceHatPosition\r\n\
@@ -2177,6 +2202,73 @@ mod texture_tests {
         assert_eq!(toggle.label, "Hide hat");
         assert_eq!(toggle.value, "0");
         assert_eq!(toggle.options, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn exposes_a_model_changing_key_bound_toggle() {
+        // A `[Key*]` cycle that only moves a draw range still changes the
+        // submitted triangles: the model-output predicate must keep exposing it.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $shoes = 0\r\n\
+             [KeyShoes]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $shoes = 0, 1\r\n\
+             [TextureOverrideShoes]\r\n\
+             if $shoes == 1\r\n\
+             \tib = ResourceShoesIB\r\n\
+             \tdrawindexed = 6, 6, 0\r\n\
+             else\r\n\
+             \tib = ResourceNoShoesIB\r\n\
+             \tdrawindexed = 6, 0, 0\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert_eq!(toggles.len(), 1, "{toggles:?}");
+        assert_eq!(toggles[0].name, "shoes");
+        assert_eq!(toggles[0].value, "0");
+        assert_eq!(toggles[0].options, vec!["0".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn excludes_model_changing_internal_condition_flags() {
+        // BelleStars_Toggles shape: `$bear` and `$starshairdraw` are
+        // [Constants]/condition flags that switch geometry, but no [Key*]
+        // section binds them, so the viewer must not offer them as in-game
+        // controls. `$noop` is key-bound yet changes nothing, proving the
+        // model-output predicate still filters candidates after the new gate.
+        let parsed = vec![parsed_ini(
+            "[Constants]\r\n\
+             global persist $bear = 0\r\n\
+             global persist $starshairdraw = 1\r\n\
+             global persist $noop = 0\r\n\
+             [KeyNoop]\r\n\
+             key = VK_2\r\n\
+             type = cycle\r\n\
+             $noop = 0, 1\r\n\
+             [TextureOverrideBear]\r\n\
+             if $bear == 1\r\n\
+             \tvb0 = ResourceBearPosition\r\n\
+             else\r\n\
+             \tvb0 = ResourceBodyPosition\r\n\
+             endif\r\n\
+             [TextureOverrideHair]\r\n\
+             if $starshairdraw == 1\r\n\
+             \tvb0 = ResourceStarHairPosition\r\n\
+             endif\r\n\
+             if $noop == 1\r\n\
+             \t; no binding: the key-bound variable changes nothing\r\n\
+             endif\r\n",
+        )];
+        let state = base_state(&parsed);
+        let harvest = harvest_all(&parsed, &state);
+
+        let toggles = supported_toggles(&parsed, &state, &harvest);
+        assert!(toggles.is_empty(), "{toggles:?}");
     }
 
     #[test]
@@ -2275,6 +2367,10 @@ mod texture_tests {
             "[Constants]\r\n\
              global persist $outfit = 0\r\n\
              global persist $outfit_on = 0\r\n\
+             [KeyOutfit]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $outfit = 0, 1\r\n\
              [Present]\r\n\
              if $outfit == 1\r\n\
              \t$outfit_on = 1\r\n\
@@ -2313,6 +2409,10 @@ mod texture_tests {
         let parsed = vec![parsed_ini(
             "[Constants]\r\n\
              global persist $show_weapon = 0\r\n\
+             [KeyShowWeapon]\r\n\
+             key = VK_1\r\n\
+             type = toggle\r\n\
+             $show_weapon = 0\r\n\
              [TextureOverrideWeapon]\r\n\
              if $show_weapon == 0\r\n\
              \tvb0 = ResourceWeaponHidden\r\n\
@@ -2363,6 +2463,11 @@ mod texture_tests {
             root.join("weapon.ini"),
             "[Constants]\r\n\
              global persist $show_weapon = 0\r\n\
+             \r\n\
+             [KeyShowWeapon]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $show_weapon = 0, 1\r\n\
              \r\n\
              [ResourceWeaponOffPosition]\r\n\
              filename = WeaponOffPosition.buf\r\n\

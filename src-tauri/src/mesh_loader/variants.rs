@@ -1436,6 +1436,34 @@ impl ExprParser<'_> {
     }
 }
 
+/// Variables a `[Key*]` section binds to a key: the `$name = ...` option list
+/// written inside the section (or any assignment 3DMigoto key types use).
+///
+/// This is the user-facing definition of a toggle. A `global persist $name` in
+/// `[Constants]`, assignments in `[Present]` / command lists, or condition-only
+/// flags are internal state, even when they change the rendered mesh.
+pub fn key_toggle_variables(lines: &[IniLine]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for section in parser::sections(lines) {
+        if !section.name.to_ascii_lowercase().starts_with("key") {
+            continue;
+        }
+        for index in section.header + 1..section.end {
+            let Some((lhs, _)) = split_assignment(&lines[index].text) else {
+                continue;
+            };
+            let Some(variable) = lhs.trim().strip_prefix('$') else {
+                continue;
+            };
+            let variable = variable.trim().to_ascii_lowercase();
+            if !variable.is_empty() {
+                names.insert(variable);
+            }
+        }
+    }
+    names
+}
+
 /// Variable names used as operands inside `if` / `elif` / `else if`
 /// conditions. Only these can gate a binding, so only these can change what
 /// the preview draws.
@@ -1682,6 +1710,34 @@ mod tests {
             ["2".to_string()].into_iter().collect()
         );
         assert!(candidate_values(&ini, "name").is_empty());
+    }
+
+    #[test]
+    fn only_key_sections_declare_toggle_variables() {
+        let ini = lines(
+            "[Constants]\r\n\
+             global persist $shoes = 0\r\n\
+             global persist $bear = 0\r\n\
+             [KeyShoes]\r\n\
+             key = VK_1\r\n\
+             type = cycle\r\n\
+             $shoes = 0, 1\r\n\
+             [TextureOverrideBear]\r\n\
+             if $bear == 1\r\n\
+             \tvb0 = ResourceBear\r\n\
+             endif\r\n\
+             [KeyHair]\r\n\
+             key = VK_2\r\n\
+             type = cycle\r\n\
+             $hair = 0, 1\r\n\
+             $hair = 2\r\n",
+        );
+
+        let declared = key_toggle_variables(&ini);
+        assert!(declared.contains("shoes"));
+        assert!(declared.contains("hair"));
+        // `[Constants]` persistence and a condition-only flag are not controls.
+        assert!(!declared.contains("bear"));
     }
 
     #[test]
