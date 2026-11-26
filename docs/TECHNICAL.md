@@ -317,7 +317,11 @@ archive.
 ### 3D preview
 
 - Parses `[Resource*]` sections for `filename`, `stride` and `format`, matching
-  ZZZ's split buffers (Position / Blend / Texcoord / IB) by component name.
+  ZZZ's split buffers (Position / Blend / Texcoord / IB) by component name. A
+  `filename` resolves against the folder of the INI that declares it (3DMigoto
+  semantics), then as the same path from the mod root, then by bare name
+  anywhere in the mod, so a mod whose variants share file names never renders
+  another variant's buffer.
 - When the INI is incomplete, ZZZ's default layout is used and **validated
   against the file sizes**: position stride 40 (falling back to
   36/32/24/20/16/12), texcoord stride 20 (or whichever stride yields exactly the

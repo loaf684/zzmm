@@ -152,8 +152,16 @@ is capped at 1024 px, so the extra source resolution could never be shown.
 - **Split downloads:** a GameBanana file that ships several INI roots (`body/`,
   `face/`, `hair/`) is installed under one mod folder, so the library shows one
   entry while every part still loads from its relative path.
+- **Resource paths:** a `[Resource*]` `filename` is resolved the way 3DMigoto
+  resolves it — against the folder of the INI that declares it — then as the
+  same path from the mod root, then by bare name anywhere in the mod. A name
+  that carries a folder never falls back to a same-named file in a *sibling*
+  folder, so a selected variant's `.\GraceMod.03\GracebodyB.ib` can never become
+  `GraceMod.01`'s buffer.
 - **Missing files** produce a warning naming the resource and leave the part
-  untextured rather than failing the whole preview.
+  untextured rather than failing the whole preview. A missing buffer skips the
+  part it would have drawn and is reported the same way; it is never silently
+  replaced by another variant's file.
 - **Toggle state:** alternatives not drawn by the saved state are skipped and
   counted in the preview warnings.
 - **Orientation:** positions are rotated from the game's Z-up to the viewer's
