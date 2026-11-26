@@ -100,6 +100,7 @@ pub fn run() {
             ini_parser::commands::apply_mod_hotkey_edits,
             ini_parser::commands::scan_hotkey_conflicts,
             mesh_loader::commands::load_mod_preview,
+            mesh_loader::commands::save_preview_toggles,
         ])
         .run(tauri::generate_context!());
 
