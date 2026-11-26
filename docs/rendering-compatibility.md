@@ -153,11 +153,16 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   `face/`, `hair/`) is installed under one mod folder, so the library shows one
   entry while every part still loads from its relative path.
 - **Resource paths:** a `[Resource*]` `filename` is resolved the way 3DMigoto
-  resolves it — against the folder of the INI that declares it — then as the
-  same path from the mod root, then by bare name anywhere in the mod. A name
-  that carries a folder never falls back to a same-named file in a *sibling*
-  folder, so a selected variant's `.\GraceMod.03\GracebodyB.ib` can never become
-  `GraceMod.01`'s buffer.
+  resolves it — against the folder of the INI that declares it (or, for a
+  folder-scan file, the folder it was found in) — and a path written from the
+  mod root by a nested INI is accepted as the same path. A name that carries a
+  folder never resolves by bare name, so a selected variant's missing
+  `.\GraceMod.03\GracebodyB.ib` cannot become `GraceMod.01`'s buffer. A bare
+  file name is a mod-relative reference and is searched for in the whole mod.
+  A resolved file must be a real file inside the mod folder: a `..` step that
+  stays inside is accepted (installed mods reach shared files that way), while
+  absolute paths, steps above the mod folder, and symlinked files that leave it
+  are refused.
 - **Missing files** produce a warning naming the resource and leave the part
   untextured rather than failing the whole preview. A missing buffer skips the
   part it would have drawn and is reported the same way; it is never silently

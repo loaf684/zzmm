@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use tauri::State;
 
@@ -159,13 +159,12 @@ fn build_preview(
     let mut harvest = Harvest::default();
 
     for (relative, path, lines) in &parsed {
-        // 3DMigoto resolves a resource `filename` relative to the folder that
-        // declares it, so the INI's *directory* is the base, never the INI file
-        // itself. Passing the file made every relative path miss its direct
-        // hit and fall through to the by-name search, which silently returned
-        // another variant's file (`.\GraceMod.03\GracebodyB.ib` resolving to
-        // `.\GraceMod.01\GracebodyB.ib`).
-        let found = resources::scan_lines(lines, path.parent());
+        // `base_dir` keeps the INI *file* spelling: ranking (`in_root`,
+        // `root_rank`) and the texture-scope comparisons read it. Resolution
+        // uses `IniResource::resolve_dir`, which `scan_lines` derives from this
+        // path, so a relative `filename` is read next to the INI that declared
+        // it without touching those consumers.
+        let found = resources::scan_lines(lines, Some(path.as_path()));
 
         // Texture-only INIs are common (`0.ini`, `seed/face.ini`): they hold
         // the diffuse resources and `this =` overrides but no buffers. Only
@@ -1843,43 +1842,90 @@ fn collect_diffuse_files(dir: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Resolve a resource file relative to the folder of the INI that declares it,
-/// then by name anywhere in the mod.
+/// Normalise `folder.join(name)` and require the result to stay inside `root`.
+/// `.` and `..` components are resolved lexically, so a declared
+/// `..\textures\body\Blue.dds` is accepted when it stays under the mod folder
+/// and refused the moment it climbs above it. Absolute and rooted paths are
+/// only accepted when they already point inside `root`. Returns the normalised
+/// path; the caller still checks that it is a real, symlink-confined file.
+fn path_inside(root: &Path, folder: &Path, name: &str) -> Option<PathBuf> {
+    let joined = folder.join(name);
+    let remainder = joined.strip_prefix(root).ok()?;
+
+    let mut depth: Vec<std::ffi::OsString> = Vec::new();
+    for component in remainder.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth.pop().is_none() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => depth.push(part.to_os_string()),
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+
+    let mut normalized = root.to_path_buf();
+    for part in depth {
+        normalized.push(part);
+    }
+    Some(normalized)
+}
+
+/// An existing file that is inside `root` once symlinks and junctions are
+/// followed. `Path::starts_with` compares whole components, so a sibling folder
+/// such as `<root>2` never counts as being inside `<root>`. The canonical path
+/// is returned so later comparisons use one spelling.
+fn confined_file(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_file() {
+        return None;
+    }
+
+    let file = fs::canonicalize(candidate).ok()?;
+    let root = fs::canonicalize(root).ok()?;
+    file.starts_with(root).then_some(file)
+}
+
+/// Resolve a resource file inside the mod folder.
+///
+/// 3DMigoto resolves a relative `filename` against the folder of the INI that
+/// declares it, which is `resolve_dir` (a folder scan records the folder it
+/// walked). A name that carries a directory is a path: it resolves only in that
+/// folder or as the same path from the mod root, never by bare name, so a
+/// missing `.\Variant.02\Body.ib` cannot silently become a same-named file from
+/// a sibling variant. A bare file name is a mod-relative reference and is
+/// searched for in the whole mod. Every result must be a real file inside the
+/// mod folder.
 fn resolve_file(root: &Path, resource: &IniResource) -> Option<PathBuf> {
     let name = resource.filename.as_deref()?.replace('\\', "/");
+    let folder = resource
+        .resolve_dir
+        .as_deref()
+        .or(resource.base_dir.as_deref());
 
-    if let Some(base) = &resource.base_dir {
-        let direct = base.join(&name);
-        if direct.is_file() {
-            return Some(direct);
+    if let Some(folder) = folder {
+        if let Some(candidate) = path_inside(root, folder, &name) {
+            if let Some(found) = confined_file(root, &candidate) {
+                return Some(found);
+            }
         }
     }
 
-    let (declared_dir, basename) = match name.rsplit_once('/') {
-        Some((dir, basename)) => (Some(dir), basename),
-        None => (None, name.as_str()),
-    };
-
-    // A bare file name is a mod-relative reference (an INI in `Hair/` may name
-    // a file that lives at the mod root): search the whole mod. A name that
-    // carries a directory is a path, so only the folder it names, the same
-    // path from the mod root, and the mod root itself are valid. Falling back
-    // to a by-name search for it would silently swap in a sibling variant's
-    // buffer or atlas — `.\GraceMod.03\GracebodyB.ib` becoming `GraceMod.01`'s
-    // file — instead of reporting the file as absent.
-    if declared_dir.is_none() {
-        return find_by_name(root, &basename.to_ascii_lowercase(), 0);
-    }
-
-    if !declared_dir.is_some_and(|dir| dir.starts_with("..")) {
-        let from_root = root.join(&name);
-        if from_root.is_file() {
-            return Some(from_root);
+    if name.contains('/') {
+        // An INI in a subfolder may also write the path from the mod root
+        // (`Model/body.buf`). That is the declared path again, not a basename
+        // substitution, and it still has to stay inside the mod folder.
+        if let Some(candidate) = path_inside(root, root, &name) {
+            if let Some(found) = confined_file(root, &candidate) {
+                return Some(found);
+            }
         }
+
+        return None;
     }
 
-    let at_root = root.join(basename);
-    at_root.is_file().then_some(at_root)
+    confined_file(root, &find_by_name(root, &name.to_ascii_lowercase(), 0)?)
 }
 
 fn dedupe_resources_by_path(root: &Path, resources: &mut Vec<IniResource>) {
@@ -3038,6 +3084,232 @@ mod resource_path_tests {
         assert_eq!(preview.parts.len(), 1);
         assert_eq!(preview.parts[0].vertex_count, 4);
         assert_eq!(preview.parts[0].triangle_count, 2);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_nested_ini_resolves_a_path_written_from_the_mod_root() {
+        // The INI lives in `sub/`, so its own folder is the first base; the
+        // declared `Model/...` path is written from the mod root instead. Both
+        // readings are the declared path, so the second one must be tried.
+        let mods = temp_mods("nested-ini");
+        let root = mods.join("NestedMod");
+        std::fs::create_dir_all(root.join("sub")).expect("sub dir");
+        std::fs::create_dir_all(root.join("Model")).expect("model dir");
+        std::fs::write(root.join("Model/BodyPosition.buf"), vertex_buffer(6)).expect("vb");
+        std::fs::write(
+            root.join("Model/BodyIndex.ib"),
+            index_buffer(&[0, 1, 2, 1, 2, 3, 4, 5, 3]),
+        )
+        .expect("ib");
+        std::fs::write(
+            root.join("sub/part.ini"),
+            "[ResourceBodyPosition]\r\n\
+             filename = Model/BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyIB]\r\n\
+             filename = Model/BodyIndex.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             drawindexed = 9, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "NestedMod", None).expect("preview");
+        assert_eq!(preview.parts.len(), 1);
+        assert_eq!(preview.parts[0].vertex_count, 6);
+        assert_eq!(preview.parts[0].triangle_count, 3);
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_parent_step_that_stays_inside_the_mod_still_resolves() {
+        // Installed mods reach shared files one level up
+        // (`resources/..\textures\body\Blue.dds`); containment must allow that
+        // while still refusing a step above the mod folder.
+        let mods = temp_mods("parent-step");
+        let root = mods.join("ParentMod");
+        std::fs::create_dir_all(root.join("resources")).expect("ini dir");
+        std::fs::create_dir_all(root.join("Model")).expect("model dir");
+        std::fs::write(root.join("Model/BodyPosition.buf"), vertex_buffer(6)).expect("vb");
+        std::fs::write(
+            root.join("Model/BodyIndex.ib"),
+            index_buffer(&[0, 1, 2, 1, 2, 3, 4, 5, 3]),
+        )
+        .expect("ib");
+        std::fs::write(
+            root.join("resources/part.ini"),
+            "[ResourceBodyPosition]\r\n\
+             filename = ..\\Model\\BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyIB]\r\n\
+             filename = ..\\Model\\BodyIndex.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             drawindexed = 9, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "ParentMod", None).expect("preview");
+        assert_eq!(preview.parts.len(), 1);
+        assert_eq!(preview.parts[0].vertex_count, 6);
+        assert_eq!(preview.parts[0].triangle_count, 3);
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn path_normalisation_refuses_steps_above_the_mod_folder() {
+        let root = Path::new("/mods/Mod");
+        let resources = root.join("resources");
+
+        // A step up from a subfolder stays inside the mod.
+        assert_eq!(
+            path_inside(root, &resources, "../textures/body/Blue.dds"),
+            Some(root.join("textures/body/Blue.dds"))
+        );
+        // `.` segments and mixed steps normalise.
+        assert_eq!(
+            path_inside(root, &resources, "./.././Model/Body.buf"),
+            Some(root.join("Model/Body.buf"))
+        );
+        // Climbing above the mod folder is refused.
+        assert_eq!(path_inside(root, root, "../Leaked.buf"), None);
+        assert_eq!(path_inside(root, &resources, "../../Leaked.buf"), None);
+        // An absolute path outside the mod is refused.
+        assert_eq!(path_inside(root, root, "C:/elsewhere/Leaked.buf"), None);
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_mod_folder_is_refused() {
+        // The declared path walks out of the mod and a real file sits there.
+        // The preview must not read it, and must say the buffer is missing.
+        let mods = temp_mods("escape-path");
+        let root = mods.join("EscapeMod");
+        std::fs::create_dir_all(&root).expect("mod dir");
+        std::fs::write(mods.join("LeakedPosition.buf"), vertex_buffer(9)).expect("outside vb");
+        std::fs::write(root.join("HeadPosition.buf"), vertex_buffer(3)).expect("head vb");
+        std::fs::write(root.join("Head.ib"), index_buffer(&[0, 1, 2])).expect("head ib");
+        std::fs::write(
+            root.join("escape.ini"),
+            "[ResourceLeakedPosition]\r\n\
+             filename = ..\\LeakedPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadPosition]\r\n\
+             filename = HeadPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadIB]\r\n\
+             filename = Head.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideLeaked]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceLeakedPosition\r\n\
+             draw = 9, 0\r\n\
+             \r\n\
+             [TextureOverrideHead]\r\n\
+             hash = def\r\n\
+             vb0 = ResourceHeadPosition\r\n\
+             ib = ResourceHeadIB\r\n\
+             drawindexed = 3, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "EscapeMod", None).expect("preview");
+        assert!(
+            preview.warnings.iter().any(|warning| warning
+                .contains("LeakedPosition.buf was not found on disk")),
+            "the refused path must be reported: {:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "Head");
+        assert!(
+            preview
+                .parts
+                .iter()
+                .all(|part| part.vertex_count != 9 && part.triangle_count != 3),
+            "a file outside the mod folder must never be read"
+        );
+
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_missing_path_is_never_filled_by_a_same_named_root_file() {
+        // The declared `.\Variant.02\Body.ib` is absent; a same-named file sits
+        // at the mod root. The path must not fall back to it.
+        let mods = temp_mods("root-basename");
+        let root = mods.join("RootNameMod");
+        std::fs::create_dir_all(root.join("Variant.02")).expect("variant dir");
+        std::fs::write(root.join("Variant.02/BodyPosition.buf"), vertex_buffer(9)).expect("vb");
+        std::fs::write(root.join("Body.ib"), index_buffer(&[0, 1, 2, 1, 2, 3]))
+            .expect("root ib");
+        std::fs::write(root.join("HeadPosition.buf"), vertex_buffer(3)).expect("head vb");
+        std::fs::write(root.join("Head.ib"), index_buffer(&[0, 1, 2])).expect("head ib");
+        std::fs::write(
+            root.join("rootname.ini"),
+            "[ResourceBodyPosition]\r\n\
+             filename = .\\Variant.02\\BodyPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceBodyIB]\r\n\
+             filename = .\\Variant.02\\Body.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [ResourceHeadPosition]\r\n\
+             filename = HeadPosition.buf\r\n\
+             stride = 40\r\n\
+             \r\n\
+             [ResourceHeadIB]\r\n\
+             filename = Head.ib\r\n\
+             format = DXGI_FORMAT_R16_UINT\r\n\
+             \r\n\
+             [TextureOverrideBody]\r\n\
+             hash = abc\r\n\
+             vb0 = ResourceBodyPosition\r\n\
+             ib = ResourceBodyIB\r\n\
+             drawindexed = 6, 0, 0\r\n\
+             \r\n\
+             [TextureOverrideHead]\r\n\
+             hash = def\r\n\
+             vb0 = ResourceHeadPosition\r\n\
+             ib = ResourceHeadIB\r\n\
+             drawindexed = 3, 0, 0\r\n",
+        )
+        .expect("ini");
+
+        let preview = build_preview(&mods, "RootNameMod", None).expect("preview");
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Body.ib was not found on disk")),
+            "missing path must be reported: {:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.parts.len(), 1, "{:?}", preview.parts);
+        assert_eq!(preview.parts[0].name, "Head");
+        assert!(
+            preview.parts.iter().all(|part| part.triangle_count != 2),
+            "the root-level same-named file must not stand in for the missing path"
+        );
 
         let _ = std::fs::remove_dir_all(&mods);
     }

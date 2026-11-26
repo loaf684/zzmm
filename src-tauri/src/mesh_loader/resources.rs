@@ -9,8 +9,15 @@ pub struct IniResource {
     pub filename: Option<String>,
     pub stride: Option<usize>,
     pub format: Option<String>,
-    /// Directory of the INI: 3DMigoto resolves `filename` relative to it.
+    /// The INI file that declared this resource (or the folder a scanned file
+    /// was found in). Ranking and texture-scope comparisons read this value
+    /// exactly as they always have, so it must keep the caller's spelling.
     pub base_dir: Option<PathBuf>,
+    /// The folder a `filename` is resolved against: the parent of the declaring
+    /// INI, or the folder a scanned file was found in. 3DMigoto resolves a
+    /// relative `filename` against the folder of the declaring INI, which is
+    /// why resolution uses this field and not `base_dir`.
+    pub resolve_dir: Option<PathBuf>,
 }
 
 impl IniResource {
@@ -170,9 +177,18 @@ pub fn cores_match(a: &str, b: &str) -> bool {
 
 /// Collect the resource files of an already-decoded INI, so callers that also
 /// need the command lines (toggle evaluation) only read the file once.
+///
+/// `base_dir` is the INI file as the caller knows it. Resolution uses its
+/// parent (`resolve_dir`); `base_dir` itself keeps that caller spelling because
+/// ranking and texture-scope comparisons read it.
 pub fn scan_lines(lines: &[IniLine], base_dir: Option<&Path>) -> ResourceScan {
     let mut scan = ResourceScan::default();
     let base_dir = base_dir.map(Path::to_path_buf);
+    let resolve_dir = base_dir
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf);
 
     for section in parser::sections(lines) {
         if !section.name.to_ascii_lowercase().starts_with("resource") {
@@ -182,6 +198,7 @@ pub fn scan_lines(lines: &[IniLine], base_dir: Option<&Path>) -> ResourceScan {
         let mut resource = IniResource {
             section: section.name.clone(),
             base_dir: base_dir.clone(),
+            resolve_dir: resolve_dir.clone(),
             ..IniResource::default()
         };
 
@@ -260,6 +277,7 @@ pub fn scan_folder(root: &Path) -> ResourceScan {
                 stride: None,
                 format: None,
                 base_dir: Some(dir.to_path_buf()),
+                resolve_dir: Some(dir.to_path_buf()),
             };
 
             if lower.ends_with(".buf") || lower.ends_with(".ib") {
@@ -318,8 +336,38 @@ mod tests {
         assert_eq!(scan.buffers.len(), 2);
         assert_eq!(scan.textures.len(), 1);
         assert_eq!(scan.textures[0].filename.as_deref(), Some("body.dds"));
+        // A scanned file resolves against the folder it was found in, which is
+        // also the value the historical `base_dir` consumers expect.
+        assert_eq!(scan.textures[0].base_dir.as_deref(), Some(dir.as_path()));
+        assert_eq!(scan.textures[0].resolve_dir.as_deref(), Some(dir.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_lines_keeps_the_ini_path_and_exposes_its_folder() {
+        // `base_dir` must keep the caller's INI file path: ranking and texture
+        // scope comparisons read that exact value. Resolution uses the parent
+        // directory in `resolve_dir` instead, so a `filename` lands in the
+        // folder that declared it.
+        let lines = parser::split_lines(
+            "[ResourceBodyPosition]\r\nfilename = Body.buf\r\nstride = 40\r\n",
+        );
+        let scan = scan_lines(
+            &lines,
+            Some(Path::new("/mods/Mod/body/body.ini")),
+        );
+
+        assert_eq!(scan.buffers.len(), 1);
+        let resource = &scan.buffers[0];
+        assert_eq!(
+            resource.base_dir.as_deref(),
+            Some(Path::new("/mods/Mod/body/body.ini"))
+        );
+        assert_eq!(
+            resource.resolve_dir.as_deref(),
+            Some(Path::new("/mods/Mod/body"))
+        );
     }
 
     #[test]
