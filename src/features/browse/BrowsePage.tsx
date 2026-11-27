@@ -166,14 +166,19 @@ export function BrowsePage() {
   const hero = showStorefront ? items[0] : null;
 
   const stats = useMemo<BrowseStats>(() => {
-    const mods = modsResult?.mods ?? [];
+    // Browsing never scans the library, so on a cold start these are unknown
+    // rather than zero.
+    if (!modsResult) return { installed: null, characters: null, conflicts: null };
+
     const characters = new Set(
-      mods.map((mod) => mod.character).filter((name): name is string => Boolean(name)),
+      modsResult.mods
+        .map((mod) => mod.character)
+        .filter((name): name is string => Boolean(name)),
     );
     return {
-      installed: mods.length,
+      installed: modsResult.mods.length,
       characters: characters.size,
-      conflicts: modsResult?.conflicts.length ?? 0,
+      conflicts: modsResult.conflicts.length,
     };
   }, [modsResult]);
 
@@ -195,7 +200,7 @@ export function BrowsePage() {
   }, [showStorefront, items]);
 
   return (
-    <div className="mx-auto w-full max-w-[1500px] px-8 py-8">
+    <div className="mx-auto w-full max-w-[1500px] px-4 py-6 sm:px-8 sm:py-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="eyebrow">Sector 04 // Network</p>
