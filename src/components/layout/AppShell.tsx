@@ -9,6 +9,7 @@ import {
   Search,
   Settings2,
   Users,
+  Wrench,
   X,
 } from "lucide-react";
 import {
@@ -45,6 +46,7 @@ interface CharacterEntry {
 const NAV_ITEMS: NavItem[] = [
   { to: "/installed", label: "Installed", icon: Layers },
   { to: "/browse", label: "Browse", icon: Compass },
+  { to: "/fixer", label: "Fixer", icon: Wrench },
   { to: "/settings", label: "Settings", icon: Settings2 },
 ];
 
