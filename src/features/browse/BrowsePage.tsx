@@ -17,12 +17,15 @@ import { Panel } from "@/components/ui/Panel";
 import { SuggestionInput } from "@/components/ui/SuggestionInput";
 import { cn } from "@/lib/cn";
 import { useBrowseStore } from "@/store/browse";
+import { useDownloadStore } from "@/store/download";
+import { useInstallerStore } from "@/store/installer";
 import { useModsStore } from "@/store/mods";
-import type { BrowseSort, CategoryChip, ModSummary } from "@/types/gamebanana";
+import { useUpdatesStore } from "@/store/updates";
+import type { BrowseSort } from "@/types/gamebanana";
 import { BrowseCard, BrowseCardSkeleton } from "./BrowseCard";
-import { BrowseHero } from "./BrowseHero";
+import { BrowseHero, BrowseHeroSkeleton } from "./BrowseHero";
 import type { BrowseStats } from "./BrowseHero";
-import { BrowseRail } from "./BrowseRail";
+import { BrowseRail, BrowseRailSkeleton } from "./BrowseRail";
 
 const SORT_GROUPS: { label: string; options: { value: BrowseSort; label: string }[] }[] = [
   {
@@ -50,53 +53,6 @@ const SORT_GROUPS: { label: string; options: { value: BrowseSort; label: string 
     ],
   },
 ];
-
-/** Rails per storefront and cards per rail. */
-const RAIL_LIMIT = 3;
-const RAIL_ITEMS = 5;
-/** Rows the grid must keep: the shelves never eat the whole page. */
-const MIN_GRID_ITEMS = 4;
-
-interface BrowseRailGroup {
-  category: string;
-  /** Resolved from the category list; `null` while it is unknown. */
-  categoryId: number | null;
-  items: ModSummary[];
-}
-
-/** Rails read the trending feed rather than the result page, so changing the
- *  result sort, paging or filters cannot relabel or reshuffle them. Mods
- *  without a real root category stay in the grid: there is no category filter
- *  to offer for them. */
-function buildRails(
-  trending: ModSummary[],
-  categories: CategoryChip[],
-): BrowseRailGroup[] {
-  const groups = new Map<string, ModSummary[]>();
-
-  for (const mod of trending) {
-    const category = mod.category?.trim();
-    if (!category) continue;
-
-    const key = category.toLowerCase();
-    const list = groups.get(key);
-    if (list) list.push(mod);
-    else groups.set(key, [mod]);
-  }
-
-  return [...groups.values()]
-    .filter((mods) => mods.length >= 3)
-    .sort((a, b) => b.length - a.length || a[0].name.localeCompare(b[0].name))
-    .slice(0, RAIL_LIMIT)
-    .map((mods) => {
-      const category = mods[0].category?.trim() ?? "";
-      const match = categories.find(
-        (entry) => entry.name.toLowerCase() === category.toLowerCase(),
-      );
-
-      return { category, categoryId: match?.id ?? null, items: mods.slice(0, RAIL_ITEMS) };
-    });
-}
 
 /** Suggestions for the character field. GameBanana's subcategory names are
  *  matched by substring, so partial names like "Ellen" work too. */
@@ -157,9 +113,6 @@ export function BrowsePage() {
   const lastCached = useBrowseStore((state) => state.lastCached);
   const categories = useBrowseStore((state) => state.categories);
   const categoryError = useBrowseStore((state) => state.categoryError);
-  const trending = useBrowseStore((state) => state.trending);
-  const trendingError = useBrowseStore((state) => state.trendingError);
-  const details = useBrowseStore((state) => state.details);
 
   const setSearch = useBrowseStore((state) => state.setSearch);
   const setSort = useBrowseStore((state) => state.setSort);
@@ -169,22 +122,38 @@ export function BrowsePage() {
   const setCharacter = useBrowseStore((state) => state.setCharacter);
   const refresh = useBrowseStore((state) => state.refresh);
   const loadMore = useBrowseStore((state) => state.loadMore);
-  const loadTrending = useBrowseStore((state) => state.loadTrending);
   const loadCategories = useBrowseStore((state) => state.loadCategories);
-  const loadDetail = useBrowseStore((state) => state.loadDetail);
+  const rails = useBrowseStore((state) => state.rails);
+  const railsLoading = useBrowseStore((state) => state.railsLoading);
+  const railsError = useBrowseStore((state) => state.railsError);
+  const loadRails = useBrowseStore((state) => state.loadRails);
+  const loadSpotlightDetail = useBrowseStore((state) => state.loadSpotlightDetail);
+  const details = useBrowseStore((state) => state.details);
 
   const modsResult = useModsStore((state) => state.result);
+  const updatesResult = useUpdatesStore((state) => state.result);
+  const downloading = useDownloadStore((state) => state.isBusy);
+  const installingArchive = useInstallerStore((state) => state.isInstalling);
 
   const navigate = useNavigate();
   const [searchInput, setSearchInput] = useState(filters.search);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const catalogRef = useRef<HTMLDivElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  /** Set by "See all": the catalog only settles once the storefront is gone. */
+  const pendingCatalogFocus = useRef(false);
 
   // First load, and category chips for the filter row.
   useEffect(() => {
     void loadCategories();
     if (useBrowseStore.getState().items.length === 0) refresh();
   }, [loadCategories, refresh]);
+
+  // Shelves need the category list; the fallback shelf only needs the API.
+  useEffect(() => {
+    if (categories.length > 0 || categoryError !== null) void loadRails();
+  }, [categories.length, categoryError, loadRails]);
 
   // Debounce typing so every keystroke does not hit the API.
   useEffect(() => {
@@ -212,95 +181,147 @@ export function BrowsePage() {
     filters.search || filters.character || filters.categoryId !== null,
   );
 
-  // The unfiltered feed opens as a storefront: one featured card, trending
-  // shelves, then the rest of the results.
-  const showStorefront = !activeFilters && items.length > 0;
-  const hero = showStorefront ? items[0] : null;
-  const heroId = hero?.id ?? null;
-  const isUpdating = isLoading && items.length > 0;
+  // The unfiltered page opens as a storefront: a trending spotlight, real
+  // trending shelves, then the catalog. The shelves come from their own
+  // `sort=trending` requests, so the feed's sort and Load more cannot relabel
+  // or reshuffle them.
+  const unfiltered = !activeFilters;
+  const featured = unfiltered
+    ? (rails[0]?.items[0] ?? (railsLoading ? null : (items[0] ?? null)))
+    : null;
+  const featuredId = featured?.id ?? null;
+  const featuredDetail = featuredId !== null ? details[featuredId] : undefined;
+  /** The hero only exists on the unfiltered dashboard. */
+  const spotlight = unfiltered ? featured : null;
 
-  // The storefront is the only place the rails are used, so the trending feed
-  // is only fetched for it (and re-used for the rest of the session).
-  useEffect(() => {
-    if (!activeFilters) void loadTrending();
-  }, [activeFilters, loadTrending]);
+  const shelves = unfiltered
+    ? rails
+        .map((shelf) => ({
+          ...shelf,
+          items: shelf.items.filter((mod) => mod.id !== featuredId),
+        }))
+        .filter((shelf) => shelf.items.length > 0)
+    : [];
 
-  // The summary only carries the ~220px thumbnail; the detail payload has the
-  // full-size gallery image the hero wants.
-  useEffect(() => {
-    if (heroId !== null) void loadDetail(heroId);
-  }, [heroId, loadDetail]);
+  // The spotlight picks one mod, so it must not be the first grid card too.
+  const visibleItems =
+    featuredId === null ? items : items.filter((mod) => mod.id !== featuredId);
 
-  const stats = useMemo<BrowseStats>(() => {
-    // Browsing never scans the library, so on a cold start these are unknown
-    // rather than zero.
-    if (!modsResult) return { installed: null, characters: null, conflicts: null };
-
-    const characters = new Set(
-      modsResult.mods
-        .map((mod) => mod.character)
-        .filter((name): name is string => Boolean(name)),
-    );
-    return {
-      installed: modsResult.mods.length,
-      characters: characters.size,
-      conflicts: modsResult.conflicts.length,
-    };
-  }, [modsResult]);
-
-  const heroArtwork = heroId === null
-    ? null
-    : (details[heroId]?.gallery.find((url) => url.trim()) ?? null);
-
-  const rails = useMemo(
-    () => (showStorefront ? buildRails(trending, categories) : []),
-    [showStorefront, trending, categories],
+  const stats = useMemo<BrowseStats>(
+    () => ({
+      // Browsing never scans the library, so unknown stays unknown.
+      installed: modsResult ? modsResult.mods.length : null,
+      updates: updatesResult
+        ? updatesResult.updates.filter((update) => update.hasUpdate).length
+        : null,
+      // One download slot plus one archive batch, whichever is running.
+      queue: downloading || installingArchive ? 1 : 0,
+    }),
+    [modsResult, updatesResult, downloading, installingArchive],
   );
 
-  // Drop the smallest shelves first: "Everything else" keeps enough rows to be
-  // worth scrolling even when the trending feed is small.
-  const visibleRails = useMemo(() => {
-    if (heroId === null) return [];
+  const focusCatalog = () => {
+    catalogRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    searchRef.current?.focus({ preventScroll: true });
+  };
 
-    const kept = [...rails];
-    let shelved = kept.reduce((count, rail) => count + rail.items.length, 0);
-    while (kept.length > 0 && items.length - 1 - shelved < MIN_GRID_ITEMS) {
-      const dropped = kept.pop();
-      if (!dropped) break;
-      shelved -= dropped.items.length;
-    }
+  // A "See all" click removes the storefront above the catalog, so scrolling in
+  // the click handler lands mid-grid; wait for the filtered layout instead.
+  useEffect(() => {
+    if (!pendingCatalogFocus.current || !activeFilters) return;
+    pendingCatalogFocus.current = false;
+    focusCatalog();
+  }, [activeFilters]);
 
-    return kept;
-  }, [rails, heroId, items.length]);
-
-  // The featured mod and every shelved mod are discovery picks of their own, so
-  // they are not repeated in the grid below them.
-  const gridItems = useMemo(() => {
-    if (heroId === null) return items;
-
-    const shelvedIds = new Set(
-      visibleRails.flatMap((rail) => rail.items.map((mod) => mod.id)),
-    );
-    return items.filter((mod) => mod.id !== heroId && !shelvedIds.has(mod.id));
-  }, [items, heroId, visibleRails]);
+  // The spotlight wants the full record for its gallery image and teaser.
+  useEffect(() => {
+    if (featuredId !== null) void loadSpotlightDetail(featuredId);
+  }, [featuredId, loadSpotlightDetail]);
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-4 py-6 sm:px-8 sm:py-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="eyebrow">Sector 04 // Network</p>
-          <h1 className="mt-1.5 font-display text-[26px] font-semibold tracking-tight text-zinc-50">
-            Browse GameBanana
+          <h1 className="font-display text-[26px] font-semibold tracking-tight text-zinc-50">
+            Dashboard
           </h1>
           <p className="mt-1.5 max-w-xl text-[13px] leading-relaxed text-zinc-500">
-            {total > 0
-              ? `${total.toLocaleString()} Zenless Zone Zero mods on GameBanana.`
-              : "Zenless Zone Zero mods hosted on GameBanana."}{" "}
-            Downloads install straight into your Mods folder.
+            Discover featured, trending, and new mods.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" onClick={refresh} loading={isLoading}>
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+          Refresh
+        </Button>
+      </header>
+
+      {unfiltered && !spotlight && !railsError && (isLoading || railsLoading) ? (
+        <BrowseHeroSkeleton />
+      ) : null}
+
+      {spotlight ? (
+        <BrowseHero
+          mod={spotlight}
+          detail={featuredDetail}
+          stats={stats}
+          onOpen={() => navigate(`/browse/${spotlight.id}`)}
+          onBrowseStore={focusCatalog}
+        />
+      ) : null}
+
+      {unfiltered
+        ? shelves.map((shelf) => (
+            <BrowseRail
+              key={shelf.categoryId ?? "trending-now"}
+              label={shelf.label}
+              items={shelf.items}
+              onOpen={(modId) => navigate(`/browse/${modId}`)}
+              onSeeAll={
+                shelf.categoryId === null
+                  ? undefined
+                  : () => {
+                      pendingCatalogFocus.current = true;
+                      setCategory(shelf.categoryId);
+                    }
+              }
+            />
+          ))
+        : null}
+
+      {unfiltered && railsLoading && shelves.length === 0 ? (
+        <BrowseRailSkeleton />
+      ) : null}
+
+      {unfiltered && railsError ? (
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <p className="font-mono text-[10px] text-zinc-600">
+            Trending is unavailable right now: {railsError}
+          </p>
+          <Button size="sm" variant="ghost" onClick={() => void loadRails(true)}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
+
+      <div ref={catalogRef} id="browse-catalog" className="mt-10 scroll-mt-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h2 className="font-display text-[15px] uppercase tracking-[0.16em] text-zinc-300">
+              All mods
+            </h2>
+            {total > 0 ? (
+              <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-600">
+                {total.toLocaleString()} on GameBanana
+              </span>
+            ) : null}
+            {lastCached ? (
+              <span className="rounded-full border border-ink-700 bg-ink-900 px-2 py-0.5 font-mono text-[8.5px] uppercase tracking-[0.16em] text-zinc-500">
+                cached
+              </span>
+            ) : null}
+          </div>
+
           <div
             role="group"
             aria-label="Result layout"
@@ -330,46 +351,19 @@ export function BrowsePage() {
               </button>
             ))}
           </div>
-          {lastCached ? (
-            <span className="self-center rounded-full border border-ink-700 bg-ink-900 px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
-              cached
-            </span>
-          ) : null}
-          <Button
-            variant="outline"
-            onClick={() => {
-              refresh();
-              void loadTrending(true);
-            }}
-            loading={isLoading}
-          >
-            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-            Refresh
-          </Button>
         </div>
-      </header>
 
-      {hero ? (
-        <div className="mt-7">
-          <BrowseHero
-            mod={hero}
-            stats={stats}
-            artwork={heroArtwork}
-            onOpen={() => navigate(`/browse/${hero.id}`)}
-          />
-        </div>
-      ) : null}
-
-      <div className="mt-7 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[240px] flex-1">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[150px] flex-1">
           <Search
             className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600"
             aria-hidden
           />
           <input
+            ref={searchRef}
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="Search mods, authors, tags…"
+            placeholder="Search mods, authors, tags..."
             aria-label="Search GameBanana"
             className="h-10 w-full border border-ink-600 bg-ink-900/70 pl-9 pr-9 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-acid-400/60 focus:outline-none"
           />
@@ -390,7 +384,7 @@ export function BrowsePage() {
             value={filters.sort}
             onChange={(event) => setSort(event.target.value as BrowseSort)}
             aria-label="Sort results"
-            className="h-10 appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
+            className="h-10 w-[164px] appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
           >
             {SORT_GROUPS.map((group) => (
               <optgroup key={group.label} label={group.label}>
@@ -415,7 +409,7 @@ export function BrowsePage() {
               setCategory(event.target.value ? Number(event.target.value) : null)
             }
             aria-label="Filter by category"
-            className="h-10 max-w-[220px] appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
+            className="h-10 w-[164px] appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
           >
             <option value="">All categories</option>
             {categories.map((category) => (
@@ -436,7 +430,7 @@ export function BrowsePage() {
           suggestions={CHARACTER_SUGGESTIONS}
           placeholder="Character (e.g. Ellen)"
           ariaLabel="Filter by character"
-          className="w-[210px]"
+          className="w-[164px]"
         />
 
         {activeFilters ? (
@@ -483,7 +477,7 @@ export function BrowsePage() {
       ) : null}
 
       {isLoading && items.length === 0 ? (
-        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {Array.from({ length: 8 }).map((_, index) => (
             <BrowseCardSkeleton key={index} />
           ))}
@@ -512,55 +506,25 @@ export function BrowsePage() {
         </Panel>
       ) : null}
 
-      {showStorefront && trendingError ? (
-        <p className="mt-6 font-mono text-[10px] text-zinc-600">
-          Trending shelves unavailable: {trendingError}
+      {isLoading && items.length > 0 ? (
+        <p className="mt-3 flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
+          <Loader2 className="h-3 w-3 animate-spin text-acid-400" aria-hidden />
+          Loading results...
         </p>
       ) : null}
 
-      {visibleRails.map((rail) => (
-        <BrowseRail
-          key={rail.category}
-          title={rail.category}
-          items={rail.items}
-          seeAllDisabled={rail.categoryId === null}
-          onOpen={(modId) => navigate(`/browse/${modId}`)}
-          onSeeAll={() => {
-            // A real category filter, never a text search: the rail only offers
-            // this once the id resolved.
-            if (rail.categoryId !== null) setCategory(rail.categoryId);
-          }}
-        />
-      ))}
-
-      {showStorefront && gridItems.length > 0 ? (
-        <h2 className="mt-9 font-display text-[15px] uppercase tracking-[0.16em] text-zinc-300">
-          Everything else
-        </h2>
-      ) : null}
-
-      {isUpdating ? (
-        <p
-          role="status"
-          className="mt-6 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500"
-        >
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-acid-400" aria-hidden />
-          Updating results...
-        </p>
-      ) : null}
-
-      {gridItems.length > 0 ? (
+      {visibleItems.length > 0 ? (
         <div
-          aria-busy={isUpdating}
+          aria-busy={isLoading}
           className={cn(
-            isUpdating ? "mt-3 opacity-60" : "mt-6",
-            "transition-opacity duration-200 ease-smooth",
+            "mt-4 transition-opacity duration-200",
+            isLoading && "opacity-60",
             view === "grid"
-              ? "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+              ? "grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
               : "flex flex-col gap-2",
           )}
         >
-          {gridItems.map((mod) => (
+          {visibleItems.map((mod) => (
             <BrowseCard
               key={mod.id}
               mod={mod}
@@ -588,11 +552,12 @@ export function BrowsePage() {
 
       {hasMore && !isLoadingMore && items.length > 0 ? (
         <div className="flex justify-center py-2">
-          <Button variant="outline" size="sm" onClick={loadMore} disabled={isLoading}>
+          <Button variant="outline" size="sm" onClick={loadMore}>
             Load more
           </Button>
         </div>
       ) : null}
+      </div>
     </div>
   );
 }
