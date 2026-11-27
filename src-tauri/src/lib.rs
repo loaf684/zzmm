@@ -1,5 +1,6 @@
 mod api;
 mod error;
+mod fixer;
 mod ini_parser;
 mod installer;
 mod mesh_loader;
@@ -101,6 +102,9 @@ pub fn run() {
             ini_parser::commands::scan_hotkey_conflicts,
             mesh_loader::commands::load_mod_preview,
             mesh_loader::commands::save_preview_toggles,
+            fixer::commands::fixer_scan,
+            fixer::commands::fixer_apply,
+            fixer::commands::fixer_rollback,
         ])
         .run(tauri::generate_context!());
 
