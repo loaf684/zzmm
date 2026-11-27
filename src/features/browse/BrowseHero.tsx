@@ -16,9 +16,10 @@ import { useModsStore } from "@/store/mods";
 import type { ModSummary } from "@/types/gamebanana";
 
 export interface BrowseStats {
-  installed: number;
-  characters: number;
-  conflicts: number;
+  /** `null` until the library has been scanned on this visit. */
+  installed: number | null;
+  characters: number | null;
+  conflicts: number | null;
 }
 
 interface BrowseHeroProps {
@@ -35,11 +36,18 @@ function StatTile({
 }: {
   icon: LucideIcon;
   label: string;
-  value: number;
+  value: number | null;
   tone?: "neutral" | "hot";
 }) {
   return (
-    <div className="flex items-center gap-3 border border-ink-700 bg-ink-900/60 px-4 py-3">
+    <div
+      className="flex items-center gap-3 border border-ink-700 bg-ink-900/60 px-4 py-3"
+      title={
+        value === null
+          ? "Scan the Mods folder to fill these library numbers"
+          : undefined
+      }
+    >
       <Icon
         className={tone === "hot" ? "h-4 w-4 text-hot-400" : "h-4 w-4 text-zinc-600"}
         aria-hidden
@@ -49,7 +57,7 @@ function StatTile({
           {label}
         </p>
         <p className="font-display text-lg font-semibold leading-tight text-zinc-100">
-          {value.toLocaleString()}
+          {value === null ? "—" : value.toLocaleString()}
         </p>
       </div>
     </div>
@@ -141,7 +149,7 @@ export function BrowseHero({ mod, stats, onOpen }: BrowseHeroProps) {
           icon={AlertTriangle}
           label="Conflicts"
           value={stats.conflicts}
-          tone={stats.conflicts > 0 ? "hot" : "neutral"}
+          tone={stats.conflicts !== null && stats.conflicts > 0 ? "hot" : "neutral"}
         />
       </div>
     </section>
