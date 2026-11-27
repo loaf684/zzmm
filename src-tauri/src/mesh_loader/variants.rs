@@ -15,6 +15,11 @@ use crate::ini_parser::parser::{self, IniLine};
 use crate::ini_parser::text;
 use crate::mesh_loader::resources;
 
+/// Sentinel setting pushed for a whole-line commented `drawindexed` (for
+/// example `; drawindexed = 9123, 0, 0`). `walk` records it against the index
+/// buffer bound at that point without treating it as a submitted draw.
+const DISABLED_DRAW_MARKER: &str = "__disabled_drawindexed__";
+
 /// Saved variable values for one mod, keyed by the lower-cased variable name.
 #[derive(Debug, Default, Clone)]
 pub struct ToggleState {
@@ -143,10 +148,11 @@ pub struct Harvest {
     /// bound buffer is the draw. S11-style commented draws in a skipped group
     /// have no such line, while Nekomata/Astra/Nicole bind their IB beside one.
     pub auto_draw_hashes: HashSet<String>,
-    /// Index-buffer resource → the sections that bind it with `ib =` in the
-    /// current state. Used to tell "the game skips this draw" from "the game's
-    /// own draw paints this buffer whole".
-    pub index_sections: HashMap<String, BTreeSet<String>>,
+    /// Index-buffer resource → the sections that disable a `drawindexed` for it
+    /// with a whole-line comment. A commented draw is the mod's explicit
+    /// "this draw is off"; it is only honoured when the section's hash group is
+    /// also skipped (see [`Harvest::omits_index_draw`]).
+    pub disabled_draw_sections: HashMap<String, BTreeSet<String>>,
 }
 
 impl Harvest {
@@ -226,17 +232,20 @@ impl Harvest {
             .is_some_and(|hash| self.auto_draw_hashes.contains(hash))
     }
 
-    /// True when the game submits no geometry for this index buffer: the mod
-    /// suppresses the original draw of its hash group (`handling = skip`) and
-    /// every section that binds the buffer leaves it undrawn (no active
-    /// `drawindexed` range, no `drawindexed = auto`). The preview must then
-    /// omit the part instead of falling back to the whole buffer.
+    /// True when a commented-out `drawindexed` for this index buffer is final:
+    /// every section that disables a draw for it sits in a hash group whose
+    /// original draw the mod suppresses (`handling = skip`) and that submits no
+    /// replacement `drawindexed = auto`. The game then draws no geometry here,
+    /// so the preview must omit the part instead of falling back to the whole
+    /// buffer.
     ///
-    /// Fails open: an unbound buffer, or one whose binding section has no hash,
-    /// is never reported as skipped, so a mod that relies on the game's own
-    /// draw keeps its part.
+    /// Fails open: a buffer with no commented draw is never omitted, and a
+    /// commented draw in a hash that is not skipped (or that has an `auto`
+    /// draw) keeps the whole-buffer fallback because the game still draws it.
     pub fn omits_index_draw(&self, index_resource: &str) -> bool {
-        let Some(sections) = self.index_sections.get(&index_resource.to_ascii_lowercase())
+        let Some(sections) = self
+            .disabled_draw_sections
+            .get(&index_resource.to_ascii_lowercase())
         else {
             return false;
         };
@@ -267,8 +276,8 @@ impl Harvest {
         self.skipped_hashes.extend(other.skipped_hashes);
         self.skipped_sections.extend(other.skipped_sections);
         self.auto_draw_hashes.extend(other.auto_draw_hashes);
-        for (resource, sections) in other.index_sections {
-            self.index_sections
+        for (resource, sections) in other.disabled_draw_sections {
+            self.disabled_draw_sections
                 .entry(resource)
                 .or_default()
                 .extend(sections);
@@ -637,7 +646,15 @@ pub fn harvest(lines: &[IniLine], state: &ToggleState) -> Harvest {
         let lower = section.name.to_ascii_lowercase();
         let mut settings: Vec<String> = Vec::new();
         for index in section.header + 1..section.end {
-            let text = strip_comment(&lines[index].text);
+            let raw = &lines[index].text;
+            // `strip_comment` removes `;` and `；` comments but not `#`, so
+            // test the raw line first: a whole-line commented draw must reach
+            // the walker as a marker rather than being dropped or misparsed.
+            if is_disabled_drawindexed(raw) {
+                settings.push(DISABLED_DRAW_MARKER.to_string());
+                continue;
+            }
+            let text = strip_comment(raw);
             if !text.is_empty() {
                 settings.push(text.to_string());
             }
@@ -711,6 +728,10 @@ struct SectionRun {
     /// An active `drawindexed = auto`: the whole bound buffer is redrawn in
     /// place of the suppressed original.
     auto_draw: bool,
+    /// Index buffers whose `drawindexed` line this section comments out. Kept
+    /// apart from `drawn_ibs`: a commented draw only removes the part when the
+    /// hash group is skipped (see `omits_index_draw`).
+    disabled_ibs: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -805,6 +826,15 @@ fn walk(
                 }
                 if let Some(callee) = sections.get(&target) {
                     walk(callee, state, sections, true, visited, depth + 1, run, out);
+                }
+                continue;
+            }
+            DISABLED_DRAW_MARKER => {
+                // A whole-line comment `; drawindexed = ...` is the draw the
+                // mod switched off. Record it without adding a range; the part
+                // is only dropped when the hash group is skipped.
+                if let Some(ib) = run.current_ib.clone() {
+                    run.disabled_ibs.insert(ib);
                 }
                 continue;
             }
@@ -1012,17 +1042,14 @@ fn fold(run: &SectionRun, out: &mut Harvest) {
         out.skipped_sections.insert(run.section.clone());
     }
 
-    // Sections that bind an index buffer in the current state. The loader uses
-    // this to tell "the mod suppresses this draw and submits nothing" (S11's
-    // bag) from "the mod only rebinds the buffer and the game's own draw paints
-    // it whole" (Nekomata's hair).
-    for (resource, active) in &indexes {
-        if *active {
-            out.index_sections
-                .entry((*resource).to_string())
-                .or_default()
-                .insert(run.section.clone());
-        }
+    // Sections that comment out a draw for an index buffer. Kept separate from
+    // the submitted ranges: the part is only dropped when this section's hash
+    // group is skipped and submits no `auto` draw (S11's bag, Soukaku's mask).
+    for ib in &run.disabled_ibs {
+        out.disabled_draw_sections
+            .entry(ib.clone())
+            .or_default()
+            .insert(run.section.clone());
     }
 
     // A real variant toggle: the game draws exactly one of the alternatives a
@@ -1331,6 +1358,26 @@ struct Frame {
 fn strip_comment(line: &str) -> &str {
     let cut = line.find([';', '；']).unwrap_or(line.len());
     line[..cut].trim()
+}
+
+/// True when the whole line is a comment that disables a `drawindexed` call:
+/// `; drawindexed = 9123, 0, 0`, `# drawindexed = 3`, `；drawindexed = 3`.
+/// The ini parser keeps comments, so the raw text still carries the command;
+/// the preview honours it only when the section's hash group is skipped.
+fn is_disabled_drawindexed(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(body) = trimmed
+        .strip_prefix(';')
+        .or_else(|| trimmed.strip_prefix('#'))
+        .or_else(|| trimmed.strip_prefix('；'))
+    else {
+        return false;
+    };
+
+    body.trim_start()
+        .split(|character: char| character.is_whitespace() || character == '=')
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("drawindexed"))
 }
 
 fn split_assignment(line: &str) -> Option<(&str, &str)> {
@@ -2659,52 +2706,88 @@ mod tests {
     }
 
     #[test]
-    fn omits_only_index_buffers_a_skipped_group_leaves_undrawn() {
-        // Three index buffers in three situations:
-        // - BodyBIB: its hash group is skipped and nothing replaces the draw,
-        //   so the game submits no geometry for it (S11's bag).
-        // - BodyAIB: same skipped group, but a sibling section rebinds it beside
-        //   `drawindexed = auto`, so the whole buffer is redrawn.
-        // - PropIB: no hash at all, so the game's own draw still paints it.
-        let ini = lines(
+    fn omits_only_commented_draws_whose_hash_is_skipped() {
+        // S11 shape: the replacement draws for B and C are commented out and
+        // the shared hash sets `handling = skip`, so the game draws only A.
+        let skipped = lines(
             "[TextureOverrideBodyIB]\r\n\
              hash = abc\r\n\
              handling = skip\r\n\
-             drawindexed = auto\r\n\
              \r\n\
              [TextureOverrideBodyA]\r\n\
              hash = abc\r\n\
              ib = ResourceBodyAIB\r\n\
-             \r\n\
-             [TextureOverrideBodyB]\r\n\
-             hash = abc\r\n\
-             ib = ResourceBodyBIB\r\n\
-             ; drawindexed = 9123, 0, 0\r\n\
-             \r\n\
-             [TextureOverridePropIB]\r\n\
-             ib = ResourcePropIB\r\n",
-        );
-
-        let tracked = harvest(&ini, &ToggleState::default());
-
-        assert!(!tracked.omits_index_draw("ResourceBodyAIB"));
-        assert!(!tracked.omits_index_draw("ResourcePropIB"));
-        // With `drawindexed = auto` in the group every buffer it could bind is
-        // redrawn whole, so even BodyB keeps its part here.
-        assert!(!tracked.omits_index_draw("ResourceBodyBIB"));
-
-        let no_auto = lines(
-            "[TextureOverrideBodyIB]\r\n\
-             hash = abc\r\n\
-             handling = skip\r\n\
+             drawindexed = 3, 0, 0\r\n\
              \r\n\
              [TextureOverrideBodyB]\r\n\
              hash = abc\r\n\
              ib = ResourceBodyBIB\r\n\
              ; drawindexed = 9123, 0, 0\r\n",
         );
-        let skipped_group = harvest(&no_auto, &ToggleState::default());
-        assert!(skipped_group.omits_index_draw("ResourceBodyBIB"));
+        let skipped_harvest = harvest(&skipped, &ToggleState::default());
+        assert!(skipped_harvest.omits_index_draw("ResourceBodyBIB"));
+        // A live draw is never an omission, commented or not.
+        assert!(!skipped_harvest.omits_index_draw("ResourceBodyAIB"));
+        assert!(skipped_harvest
+            .disabled_draw_sections
+            .contains_key("resourcebodybib"));
+
+        // `#` is a comment prefix too; it must disable the draw the same way.
+        let hash_comment = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             handling = skip\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n\
+             # drawindexed = 9123, 0, 0\r\n",
+        );
+        let hash_comment_harvest = harvest(&hash_comment, &ToggleState::default());
+        assert!(hash_comment_harvest.omits_index_draw("ResourceBodyBIB"));
+
+        // Without `handling = skip` the game still submits the draw, so a
+        // commented line keeps the whole-buffer fallback.
+        let not_skipped = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n\
+             ; drawindexed = 9123, 0, 0\r\n",
+        );
+        let not_skipped_harvest = harvest(&not_skipped, &ToggleState::default());
+        assert!(!not_skipped_harvest.omits_index_draw("ResourceBodyBIB"));
+
+        // `drawindexed = auto` redraws the whole bound buffer, so the group
+        // does submit the part even though its hash is skipped.
+        let auto = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             handling = skip\r\n\
+             drawindexed = auto\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n\
+             ; drawindexed = 9123, 0, 0\r\n",
+        );
+        let auto_harvest = harvest(&auto, &ToggleState::default());
+        assert!(!auto_harvest.omits_index_draw("ResourceBodyBIB"));
+
+        // A skipped hash with no commented draw at all fails open.
+        let no_comment = lines(
+            "[TextureOverrideBodyIB]\r\n\
+             hash = abc\r\n\
+             handling = skip\r\n\
+             \r\n\
+             [TextureOverrideBodyB]\r\n\
+             hash = abc\r\n\
+             ib = ResourceBodyBIB\r\n",
+        );
+        let no_comment_harvest = harvest(&no_comment, &ToggleState::default());
+        assert!(!no_comment_harvest.omits_index_draw("ResourceBodyBIB"));
 
         // A `handling = skip` inside a branch the saved state does not take
         // leaves the original draw in place, so the part is kept.
@@ -2717,11 +2800,12 @@ mod tests {
              \r\n\
              [TextureOverrideBodyB]\r\n\
              hash = abc\r\n\
-             ib = ResourceBodyBIB\r\n",
+             ib = ResourceBodyBIB\r\n\
+             ; drawindexed = 9123, 0, 0\r\n",
         );
         let state = state(&[("hide", "0")]);
-        let gated = harvest(&conditional, &state);
-        assert!(!gated.omits_index_draw("ResourceBodyBIB"));
+        let conditional_harvest = harvest(&conditional, &state);
+        assert!(!conditional_harvest.omits_index_draw("ResourceBodyBIB"));
     }
 
     #[test]
