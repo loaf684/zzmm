@@ -652,8 +652,12 @@ The sidebar uses the shipped app icon (`src-tauri/icons/icon.png`, copied to
 - The fixer's hash database is a snapshot of upstream's data at a pinned commit
   (`src-tauri/assets/zzz-mod-fixer/NOTICE.md`). A game update that adds hashes
   needs a regeneration, not a code change.
-- The fixer never rewrites a hash on the first line of an INI (upstream's own
-  regex has the same limit) and never follows symlinked folders while scanning.
+- The fixer scans every line, so a hash on an INI's first line is found and
+  rewritten (upstream's `\n`-prefixed pattern misses it). It never follows
+  symlinked folders while scanning, and a fix that adds or multiplies a section
+  needs that hash's own `[TextureOverride...]`/`[ShaderOverride...]` section:
+  when the INI has none, the run reports the file as an error and writes
+  nothing rather than a partial fix.
 - The INI parser treats every physical line independently, so 3DMigoto line
   continuations are preserved but not understood as one value.
 - The UI exposes only hotkey key/type editing; raw INI editing is not available.

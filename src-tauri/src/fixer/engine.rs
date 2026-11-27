@@ -929,6 +929,28 @@ mod tests {
         assert_eq!(outcome.report.unsupported[0].hash, "aaaabbbb");
     }
 
+    /// Upstream's `\n`-prefixed scan cannot see a hash on the very first line.
+    /// This port reads every line, so such a hash is found and rewritten too -
+    /// and the section below it gives the other fixes their content.
+    #[test]
+    fn a_hash_on_the_first_line_is_found_and_rewritten() {
+        let text = "hash = 3c8697e8\r\n\r\n[TextureOverrideSoldier11Head]\r\nhash = 3c8697e8\r\nmatch_priority = 0\r\n";
+
+        let outcome = run(text, Database::bundled());
+
+        assert!(outcome.report.error.is_none(), "{:?}", outcome.report.error);
+        assert!(outcome.report.touched);
+        assert!(
+            outcome.text.starts_with("hash = 67821d9d\r\n; hash = 3c8697e8\r\n"),
+            "first line not rewritten:\n{}",
+            outcome.text
+        );
+        assert_eq!(outcome.text.matches("hash = 67821d9d").count(), 2);
+        assert_eq!(outcome.report.updated.len(), 1);
+        assert_eq!(outcome.report.updated[0].from, "3c8697e8");
+        assert_eq!(outcome.report.updated[0].to, "67821d9d");
+    }
+
     #[test]
     fn characters_come_from_the_fix_data() {
         let db = Database::bundled();
