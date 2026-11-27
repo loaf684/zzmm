@@ -18,7 +18,7 @@ import { SuggestionInput } from "@/components/ui/SuggestionInput";
 import { cn } from "@/lib/cn";
 import { useBrowseStore } from "@/store/browse";
 import { useModsStore } from "@/store/mods";
-import type { BrowseSort, ModSummary } from "@/types/gamebanana";
+import type { BrowseSort, CategoryChip, ModSummary } from "@/types/gamebanana";
 import { BrowseCard, BrowseCardSkeleton } from "./BrowseCard";
 import { BrowseHero } from "./BrowseHero";
 import type { BrowseStats } from "./BrowseHero";
@@ -50,6 +50,53 @@ const SORT_GROUPS: { label: string; options: { value: BrowseSort; label: string 
     ],
   },
 ];
+
+/** Rails per storefront and cards per rail. */
+const RAIL_LIMIT = 3;
+const RAIL_ITEMS = 5;
+/** Rows the grid must keep: the shelves never eat the whole page. */
+const MIN_GRID_ITEMS = 4;
+
+interface BrowseRailGroup {
+  category: string;
+  /** Resolved from the category list; `null` while it is unknown. */
+  categoryId: number | null;
+  items: ModSummary[];
+}
+
+/** Rails read the trending feed rather than the result page, so changing the
+ *  result sort, paging or filters cannot relabel or reshuffle them. Mods
+ *  without a real root category stay in the grid: there is no category filter
+ *  to offer for them. */
+function buildRails(
+  trending: ModSummary[],
+  categories: CategoryChip[],
+): BrowseRailGroup[] {
+  const groups = new Map<string, ModSummary[]>();
+
+  for (const mod of trending) {
+    const category = mod.category?.trim();
+    if (!category) continue;
+
+    const key = category.toLowerCase();
+    const list = groups.get(key);
+    if (list) list.push(mod);
+    else groups.set(key, [mod]);
+  }
+
+  return [...groups.values()]
+    .filter((mods) => mods.length >= 3)
+    .sort((a, b) => b.length - a.length || a[0].name.localeCompare(b[0].name))
+    .slice(0, RAIL_LIMIT)
+    .map((mods) => {
+      const category = mods[0].category?.trim() ?? "";
+      const match = categories.find(
+        (entry) => entry.name.toLowerCase() === category.toLowerCase(),
+      );
+
+      return { category, categoryId: match?.id ?? null, items: mods.slice(0, RAIL_ITEMS) };
+    });
+}
 
 /** Suggestions for the character field. GameBanana's subcategory names are
  *  matched by substring, so partial names like "Ellen" work too. */
@@ -110,6 +157,9 @@ export function BrowsePage() {
   const lastCached = useBrowseStore((state) => state.lastCached);
   const categories = useBrowseStore((state) => state.categories);
   const categoryError = useBrowseStore((state) => state.categoryError);
+  const trending = useBrowseStore((state) => state.trending);
+  const trendingError = useBrowseStore((state) => state.trendingError);
+  const details = useBrowseStore((state) => state.details);
 
   const setSearch = useBrowseStore((state) => state.setSearch);
   const setSort = useBrowseStore((state) => state.setSort);
@@ -119,7 +169,9 @@ export function BrowsePage() {
   const setCharacter = useBrowseStore((state) => state.setCharacter);
   const refresh = useBrowseStore((state) => state.refresh);
   const loadMore = useBrowseStore((state) => state.loadMore);
+  const loadTrending = useBrowseStore((state) => state.loadTrending);
   const loadCategories = useBrowseStore((state) => state.loadCategories);
+  const loadDetail = useBrowseStore((state) => state.loadDetail);
 
   const modsResult = useModsStore((state) => state.result);
 
@@ -160,10 +212,24 @@ export function BrowsePage() {
     filters.search || filters.character || filters.categoryId !== null,
   );
 
-  // The unfiltered feed opens as a storefront: one featured card, then a shelf
-  // per category taken from the items already loaded (no extra API calls).
+  // The unfiltered feed opens as a storefront: one featured card, trending
+  // shelves, then the rest of the results.
   const showStorefront = !activeFilters && items.length > 0;
   const hero = showStorefront ? items[0] : null;
+  const heroId = hero?.id ?? null;
+  const isUpdating = isLoading && items.length > 0;
+
+  // The storefront is the only place the rails are used, so the trending feed
+  // is only fetched for it (and re-used for the rest of the session).
+  useEffect(() => {
+    if (!activeFilters) void loadTrending();
+  }, [activeFilters, loadTrending]);
+
+  // The summary only carries the ~220px thumbnail; the detail payload has the
+  // full-size gallery image the hero wants.
+  useEffect(() => {
+    if (heroId !== null) void loadDetail(heroId);
+  }, [heroId, loadDetail]);
 
   const stats = useMemo<BrowseStats>(() => {
     // Browsing never scans the library, so on a cold start these are unknown
@@ -182,22 +248,41 @@ export function BrowsePage() {
     };
   }, [modsResult]);
 
-  const rails = useMemo<Array<[string, ModSummary[]]>>(() => {
-    if (!showStorefront) return [];
-    const featuredId = items[0]?.id;
-    const groups = new Map<string, ModSummary[]>();
-    for (const mod of items) {
-      if (mod.id === featuredId) continue;
-      const key = mod.category ?? "Other";
-      const list = groups.get(key);
-      if (list) list.push(mod);
-      else groups.set(key, [mod]);
+  const heroArtwork = heroId === null
+    ? null
+    : (details[heroId]?.gallery.find((url) => url.trim()) ?? null);
+
+  const rails = useMemo(
+    () => (showStorefront ? buildRails(trending, categories) : []),
+    [showStorefront, trending, categories],
+  );
+
+  // Drop the smallest shelves first: "Everything else" keeps enough rows to be
+  // worth scrolling even when the trending feed is small.
+  const visibleRails = useMemo(() => {
+    if (heroId === null) return [];
+
+    const kept = [...rails];
+    let shelved = kept.reduce((count, rail) => count + rail.items.length, 0);
+    while (kept.length > 0 && items.length - 1 - shelved < MIN_GRID_ITEMS) {
+      const dropped = kept.pop();
+      if (!dropped) break;
+      shelved -= dropped.items.length;
     }
-    return [...groups.entries()]
-      .filter(([, list]) => list.length >= 3)
-      .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, 3);
-  }, [showStorefront, items]);
+
+    return kept;
+  }, [rails, heroId, items.length]);
+
+  // The featured mod and every shelved mod are discovery picks of their own, so
+  // they are not repeated in the grid below them.
+  const gridItems = useMemo(() => {
+    if (heroId === null) return items;
+
+    const shelvedIds = new Set(
+      visibleRails.flatMap((rail) => rail.items.map((mod) => mod.id)),
+    );
+    return items.filter((mod) => mod.id !== heroId && !shelvedIds.has(mod.id));
+  }, [items, heroId, visibleRails]);
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-4 py-6 sm:px-8 sm:py-8">
@@ -250,7 +335,14 @@ export function BrowsePage() {
               cached
             </span>
           ) : null}
-          <Button variant="outline" onClick={refresh} loading={isLoading}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              refresh();
+              void loadTrending(true);
+            }}
+            loading={isLoading}
+          >
             <RefreshCw className="h-3.5 w-3.5" aria-hidden />
             Refresh
           </Button>
@@ -262,6 +354,7 @@ export function BrowsePage() {
           <BrowseHero
             mod={hero}
             stats={stats}
+            artwork={heroArtwork}
             onOpen={() => navigate(`/browse/${hero.id}`)}
           />
         </div>
@@ -419,38 +512,55 @@ export function BrowsePage() {
         </Panel>
       ) : null}
 
-      {rails.map(([category, mods]) => (
+      {showStorefront && trendingError ? (
+        <p className="mt-6 font-mono text-[10px] text-zinc-600">
+          Trending shelves unavailable: {trendingError}
+        </p>
+      ) : null}
+
+      {visibleRails.map((rail) => (
         <BrowseRail
-          key={category}
-          title={category}
-          items={mods}
+          key={rail.category}
+          title={rail.category}
+          items={rail.items}
+          seeAllDisabled={rail.categoryId === null}
           onOpen={(modId) => navigate(`/browse/${modId}`)}
           onSeeAll={() => {
-            const match = categories.find(
-              (candidate) => candidate.name.toLowerCase() === category.toLowerCase(),
-            );
-            if (match) setCategory(match.id);
-            else setSearch(category);
+            // A real category filter, never a text search: the rail only offers
+            // this once the id resolved.
+            if (rail.categoryId !== null) setCategory(rail.categoryId);
           }}
         />
       ))}
 
-      {showStorefront ? (
+      {showStorefront && gridItems.length > 0 ? (
         <h2 className="mt-9 font-display text-[15px] uppercase tracking-[0.16em] text-zinc-300">
           Everything else
         </h2>
       ) : null}
 
-      {items.length > 0 ? (
+      {isUpdating ? (
+        <p
+          role="status"
+          className="mt-6 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-acid-400" aria-hidden />
+          Updating results...
+        </p>
+      ) : null}
+
+      {gridItems.length > 0 ? (
         <div
+          aria-busy={isUpdating}
           className={cn(
-            "mt-6",
+            isUpdating ? "mt-3 opacity-60" : "mt-6",
+            "transition-opacity duration-200 ease-smooth",
             view === "grid"
               ? "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
               : "flex flex-col gap-2",
           )}
         >
-          {items.map((mod) => (
+          {gridItems.map((mod) => (
             <BrowseCard
               key={mod.id}
               mod={mod}
@@ -478,7 +588,7 @@ export function BrowsePage() {
 
       {hasMore && !isLoadingMore && items.length > 0 ? (
         <div className="flex justify-center py-2">
-          <Button variant="outline" size="sm" onClick={loadMore}>
+          <Button variant="outline" size="sm" onClick={loadMore} disabled={isLoading}>
             Load more
           </Button>
         </div>

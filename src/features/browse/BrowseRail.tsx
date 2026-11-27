@@ -63,13 +63,22 @@ function RailCard({ mod, onOpen }: RailCardProps) {
 interface BrowseRailProps {
   title: string;
   items: ModSummary[];
+  /** True while the category list is missing, so "See all" cannot resolve a
+   *  real category filter yet. */
+  seeAllDisabled?: boolean;
   onOpen: (modId: number) => void;
   onSeeAll: () => void;
 }
 
 /** One horizontal shelf of the store feed; the category word is the only
  *  accent so several rails can sit together without competing. */
-export function BrowseRail({ title, items, onOpen, onSeeAll }: BrowseRailProps) {
+export function BrowseRail({
+  title,
+  items,
+  seeAllDisabled = false,
+  onOpen,
+  onSeeAll,
+}: BrowseRailProps) {
   return (
     <section className="mt-8" aria-label={`Trending in ${title}`}>
       <div className="flex items-end justify-between gap-3">
@@ -79,7 +88,13 @@ export function BrowseRail({ title, items, onOpen, onSeeAll }: BrowseRailProps) 
         <button
           type="button"
           onClick={onSeeAll}
-          className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.18em] text-zinc-500 transition-colors hover:text-acid-300"
+          disabled={seeAllDisabled}
+          title={
+            seeAllDisabled
+              ? "Category filter is unavailable until the category list loads"
+              : undefined
+          }
+          className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.18em] text-zinc-500 transition-colors hover:text-acid-300 disabled:cursor-not-allowed disabled:text-zinc-700 disabled:hover:text-zinc-700"
         >
           See all
           <ChevronRight className="h-3 w-3" aria-hidden />

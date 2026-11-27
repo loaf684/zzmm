@@ -43,6 +43,12 @@ interface BrowseStore {
   isLoadingMore: boolean;
   error: string | null;
 
+  /** The storefront's Trending feed: fetched once with the trending sort and
+   *  never touched by the result sort, filters or paging. */
+  trending: ModSummary[];
+  trendingLoading: boolean;
+  trendingError: string | null;
+
   details: Record<number, ModDetail>;
   detailLoadingId: number | null;
   detailError: string | null;
@@ -54,6 +60,7 @@ interface BrowseStore {
   setView: (view: BrowseView) => void;
   refresh: () => void;
   loadMore: () => void;
+  loadTrending: (force?: boolean) => Promise<void>;
   loadCategories: () => Promise<void>;
   loadDetail: (modId: number) => Promise<void>;
 }
@@ -67,8 +74,8 @@ function mergeUnique(existing: ModSummary[], incoming: ModSummary[]): ModSummary
 }
 
 export const useBrowseStore = create<BrowseStore>((set, get) => {
-  const fetchPage = async (append: boolean) => {
-    const { filters, cursor, categories } = get();
+  const fetchPage = async (append: boolean, keepResults = false) => {
+    const { filters, cursor } = get();
     const seq = ++requestSeq;
 
     set(
@@ -78,13 +85,29 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
             isLoading: true,
             isLoadingMore: false,
             error: null,
-            items: [],
-            cursor: null,
-            hasMore: true,
+            // A sort change reloads the same storefront, so the previous page
+            // stays on screen until the new one lands; only a new query (search,
+            // category, character) drops it.
+            ...(keepResults
+              ? {}
+              : { items: [] as ModSummary[], cursor: null, hasMore: true }),
           },
     );
 
+    // GameBanana filters categories by name, and it only does so server-side on
+    // the index; the subfeed sorts match the name client-side. Resolve the id
+    // against the category list before asking, so a category click cannot race
+    // the category fetch and come back unfiltered.
+    if (
+      filters.categoryId !== null &&
+      !get().categories.some((category) => category.id === filters.categoryId)
+    ) {
+      await get().loadCategories();
+      if (seq !== requestSeq) return;
+    }
+
     try {
+      const categories = get().categories;
       const page = await api.gamebanana.browse({
         cursor: append ? cursor : null,
         search: filters.search.trim() || null,
@@ -121,7 +144,9 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
 
   const applyFilters = (patch: Partial<BrowseFilters>) => {
     set((state) => ({ filters: { ...state.filters, ...patch } }));
-    void fetchPage(false);
+    // Only the order changed: the shelf, hero and grid stay put while it loads.
+    const keepsResults = Object.keys(patch).every((key) => key === "sort");
+    void fetchPage(false, keepsResults);
   };
 
   return {
@@ -138,6 +163,10 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
     isLoading: false,
     isLoadingMore: false,
     error: null,
+
+    trending: [],
+    trendingLoading: false,
+    trendingError: null,
 
     details: {},
     detailLoadingId: null,
@@ -174,13 +203,30 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
     },
 
     refresh: () => {
-      void fetchPage(false);
+      // Same query as before, so keep what is rendered while it reloads.
+      void fetchPage(false, true);
     },
 
     loadMore: () => {
       const state = get();
       if (!state.hasMore || state.isLoading || state.isLoadingMore) return;
-      void fetchPage(true);
+      void fetchPage(true, true);
+    },
+
+    loadTrending: async (force = false) => {
+      const state = get();
+      if (!force && (state.trending.length > 0 || state.trendingLoading)) return;
+
+      set({ trendingLoading: true, trendingError: null });
+
+      try {
+        // Unfiltered on purpose: the rails are the game-wide trending feed and
+        // must not follow the result sort, filters or cursor.
+        const page = await api.gamebanana.browse({ sort: "trending" });
+        set({ trending: page.items, trendingLoading: false });
+      } catch (error) {
+        set({ trendingLoading: false, trendingError: toUserMessage(error) });
+      }
     },
 
     loadCategories: async () => {
