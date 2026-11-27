@@ -25,6 +25,9 @@ export interface BrowseStats {
 interface BrowseHeroProps {
   mod: ModSummary;
   stats: BrowseStats;
+  /** The mod's gallery image, when the detail has been loaded. `null` while it
+   *  is still on its way, which leaves the small thumbnail as the backdrop. */
+  artwork?: string | null;
   onOpen: () => void;
 }
 
@@ -66,15 +69,23 @@ function StatTile({
 
 /** The store's landing card: the top of the feed rendered as a full-bleed
  *  backdrop with the install/library numbers beside it. */
-export function BrowseHero({ mod, stats, onOpen }: BrowseHeroProps) {
+export function BrowseHero({ mod, stats, artwork = null, onOpen }: BrowseHeroProps) {
   const openUrl = useModsStore((state) => state.openUrl);
-  const [imageFailed, setImageFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
   useEffect(() => {
-    setImageFailed(false);
-  }, [mod.id, mod.thumbnailUrl]);
+    setFailedSrc(null);
+  }, [mod.id]);
 
-  const showImage = Boolean(mod.thumbnailUrl) && !imageFailed;
+  // Gallery art first (full size), then the thumbnail: the browse summary only
+  // carries the ~220px image, which stretches into a blurry backdrop.
+  const gallery = artwork?.trim() ? artwork.trim() : null;
+  const backdrop =
+    gallery && failedSrc !== gallery
+      ? gallery
+      : mod.thumbnailUrl && failedSrc !== mod.thumbnailUrl
+        ? mod.thumbnailUrl
+        : null;
 
   return (
     <section
@@ -82,12 +93,12 @@ export function BrowseHero({ mod, stats, onOpen }: BrowseHeroProps) {
       className="grid gap-3 lg:grid-cols-[minmax(0,1.75fr)_minmax(230px,1fr)]"
     >
       <div className="group relative isolate flex min-h-[320px] flex-col justify-end overflow-hidden border border-ink-700 bg-ink-900 p-6">
-        {showImage ? (
+        {backdrop ? (
           <img
-            src={mod.thumbnailUrl ?? ""}
+            src={backdrop}
             alt=""
             className="absolute inset-0 -z-10 h-full w-full object-cover opacity-90 transition-transform duration-500 ease-smooth group-hover:scale-[1.03]"
-            onError={() => setImageFailed(true)}
+            onError={() => setFailedSrc(backdrop)}
           />
         ) : (
           <div className="absolute inset-0 -z-10 flex items-center justify-center bg-gradient-to-br from-ink-800 via-ink-850 to-ink-900">
