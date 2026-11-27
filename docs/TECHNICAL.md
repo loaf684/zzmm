@@ -405,6 +405,81 @@ archive.
 - Flags hashes shared by two or more **enabled** mods, with file/section/line
   details.
 
+## Mod fixer (ZZZ-Mod-Fixer port)
+
+Skin mods break after a game update because their INIs still contain the
+character/IB/texture hashes of an older game version. The fixer rewrites those
+hashes from a hash database bundled with the app, so it works offline and
+without a Python install.
+
+The engine is a port of
+[ZZZ-Mod-Fixer](https://github.com/Vonksdesu/ZZZ-Mod-Fixer) (MIT, a continuation
+of petrascyll's original). Only its **data** is reused - 100 per-character Python
+modules flattened into `src-tauri/assets/zzz-mod-fixer/database.json` by
+`generate_database.py`; see `NOTICE.md` there for provenance and the licence
+text. The engine itself is independent Rust (`src-tauri/src/fixer/`).
+
+### Command surface
+
+| Command           | Inputs                              | Result |
+| ----------------- | ----------------------------------- | ------ |
+| `fixer_scan`      | `modsDir`                           | `{ scanned, skipped, files: [{ folder, iniPath, character, characters, updated: [{from,to,label}], additions: [{section,hash,label}], unsupported: [{command,hash,label,reason}], needsBufferPass, error? }] }` |
+| `fixer_apply`     | `modsDir`, `iniPaths[]`, `backup`   | `{ applied: [{iniPath, backupPath, updated, additions, unsupported, needsBufferPass}], failed: [{iniPath,error}], needsBufferPass: [{iniPath, commands}], unchanged: [iniPath] }` |
+| `fixer_rollback`  | `modsDir`, `iniPaths[]`             | `{ restored: [iniPath], failed: [{iniPath,error}] }` |
+
+- `fixer_scan` is read-only: no file, folder or backup is created.
+- `apply`/`rollback` refuse paths outside `modsDir` (canonicalised, so `..` and
+  symlinks cannot escape).
+- `files` lists only INIs that need something: updates, additions, unsupported
+  commands, or an `error` when the file could not be processed (such a file is
+  never written).
+- A file whose only remaining work is buffer-level ends up in
+  `needsBufferPass`, not in `applied`/`restored`: v1 does not touch `.buf` files,
+  and the per-file `unsupported` list names the commands, so the UI can say the
+  mod is *partly* fixed instead of claiming success.
+
+### Backup layout
+
+Same folders and names as upstream's `Ini.save()`, so either tool can undo the
+other's work:
+
+1. From the INI's folder upwards, the first of `<dir>/Data/ZZMI`, `<dir>` named
+   `ZZMI`, or `<dir>/ZZMI` wins.
+2. Otherwise the drive roots are tried: `XXMI\Data\ZZMI`, `Data\ZZMI`,
+   `XXMI\ZZMI`, `XXMI Launcher\ZZMI`, `ZZMI`.
+3. The winner gets `(.ini) Caches`; with no winner, backups land next to the INI.
+
+The original is **moved** to
+`DISABLED_BACKUP_<unixtime>_<basename>.txt` (basename = the file name up to its
+first `.ini`), and the rewritten file is written to the original path with a
+temp-file + rename. If that exact backup name already exists (two INIs with the
+same name in one mod, both fixed in the same second), the timestamp is bumped by
+a second instead of overwriting the earlier backup. Rollback copies the newest
+matching backup back over the INI byte-for-byte and deletes the backup, and it
+also picks up upstream's emergency spelling
+(`DISABLED_BACKUP_<unixtime>.<basename>.txt`, written beside the INI when the
+Python tool cannot move the original); because the backup name carries only the
+basename, two same-named INIs in one mod cannot be told apart on rollback
+(upstream has the same limit). `.buf` backups (`(.buf) Backup`) are not written,
+because no `.buf` file is rewritten.
+
+### Deviations from upstream
+
+Every one of these is deliberate; `cargo test` covers the ones that could regress
+quietly.
+
+| Upstream | ZZMM | Why |
+| -------- | ---- | --- |
+| Reads and writes the whole file in Python text mode, so every line ending becomes the platform's (CRLF on Windows, LF elsewhere; a mixed-endings file is normalised) | Keeps each line's own ending; inserted lines use the file's dominant ending | A fix should be a minimal diff that looks right in any editor, and CRLF must survive on any platform |
+| `splitlines()` + `'\n'.join()` for captured and reinserted sections | Line objects with their original endings | Same reason - unrelated lines stay byte-identical |
+| `comment_sections`/`comment_commandlists`/`remove_section`/`transfer_indexed_sections` | Not run; reported as unsupported | Unused by the shipped data (and `transfer_indexed_sections` reads a field its own constructor rejects) |
+| Rebuilds a hash's IB sections (remove + reinsert) | Edits `run = CommandListSkinTexture` in place | Upstream drops repeated unindexed sections and can reorder sections of one hash; in-place editing keeps the file's structure |
+| `gb2312` else abort the file | `gb2312` when it round-trips, else a byte-preserving single-byte fallback | A file that is neither still gets fixed instead of being skipped, and never gets corrupted |
+| `hash` scan skips a hash on the file's first line (`\n` prefix) | Scans every line | Upstream's regex artefact; matching a hash literally is never wrong |
+| `hash = abc` as a *prefix* matches target `abc` | Exact (case-insensitive) comparison | Never rewrites a line whose hash merely starts with a known one |
+| Always "touches" a file whose hash is known | Touches only when a line actually changed | Keeps the second run a true no-op |
+| Rewrites into an `update_hash` cycle (Grace `89d903ba` <-> `d21f32ad`) | Detects the cycle, reports it, writes nothing | Upstream rewrites both ways on every run: the file gains two comment lines each time and never settles |
+
 ## Architecture
 
 All filesystem, archive, INI, mesh, and texture work happens in Rust as Tauri
@@ -427,6 +502,7 @@ src-tauri/src/
   mods/               scanner, metadata, characters, actions, asset scope, commands
   installer/          archive detection/extraction, root detection, install, commands
   ini_parser/         lossless INI parser, encodings, bindings, conflicts, commands
+  fixer/              ZZZ-Mod-Fixer port: hash database, rewrite engine, backups, commands
   mesh_loader/        resource scanning, buffer decoding, preview command
   texture/            DDS header parsing, BCn decoding, PNG previews
   api/                GameBanana client, TTL cache, browse/detail/updates, download, commands
@@ -470,6 +546,9 @@ IPC commands:
 | `update_ini_setting` | Change/insert one setting, losslessly (hotkey saves)   |
 | `scan_hotkey_conflicts` | Bindings from all enabled mods that overlap        |
 | `load_mod_preview`   | Buffers + textures for one mod; accepts toggle overrides |
+| `fixer_scan`         | Read-only: which mods carry outdated hashes            |
+| `fixer_apply`        | Rewrite chosen INIs, moving originals to a backup      |
+| `fixer_rollback`     | Restore chosen INIs from their backups                 |
 
 ## Thumbnail access (asset protocol)
 
@@ -564,6 +643,17 @@ The sidebar uses the shipped app icon (`src-tauri/icons/icon.png`, copied to
   never be installed automatically.
 - Encrypted ZIP/RAR archives and unusual 7z codecs are not supported.
 - Hash conflict detection covers `[TextureOverride*]` `hash` lines only.
+- The mod fixer handles the INI half of ZZZ-Mod-Fixer only: texcoord remaps,
+  colour-format shrinks and blend-index updates need a pass over `.buf` files
+  (v1) and are reported as `requires the buffer pass` instead of being applied,
+  so the affected GLB-sized files keep their old layout until that pass exists.
+  Files that need it are marked in the scan/apply results; the mod itself is
+  still partly fixed (its hashes and sections are rewritten).
+- The fixer's hash database is a snapshot of upstream's data at a pinned commit
+  (`src-tauri/assets/zzz-mod-fixer/NOTICE.md`). A game update that adds hashes
+  needs a regeneration, not a code change.
+- The fixer never rewrites a hash on the first line of an INI (upstream's own
+  regex has the same limit) and never follows symlinked folders while scanning.
 - The INI parser treats every physical line independently, so 3DMigoto line
   continuations are preserved but not understood as one value.
 - The UI exposes only hotkey key/type editing; raw INI editing is not available.

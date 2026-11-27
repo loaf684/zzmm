@@ -50,6 +50,11 @@ texture2ddecoder = "0.1.2"
 png = "0.17"
 base64 = "0.22"
 
+# Mod fixer: gb2312 (GBK) decoding for the Chinese mod INIs ZZZ-Mod-Fixer falls
+# back to. Already in the tree through reqwest; used directly for the fixer's
+# own read/write path.
+encoding_rs = "0.8"
+
 [profile.release]
 codegen-units = 1
 lto = true
