@@ -203,9 +203,14 @@ is capped at 1024 px, so the extra source resolution could never be shown.
   - a buffer with no `hash` at all.
 - **Per-IB bindings are authoritative:** when a mod binds a diffuse per index
   buffer (`Resource\ZZMI\Diffuse = ref ...` inside a `TextureOverride` that
-  matches one draw), a slice with no binding of its own is not painted with a
-  sibling's atlas: a part the game still draws renders with the neutral
-  material and the "no diffuse texture is shipped for this part" warning.
+  matches one draw), an index buffer with no binding of its own does not inherit
+  a sibling's atlas. `component_core` treats `BodyA`/`BodyB` as variants of one
+  component, so the preview used to borrow the body sheet for S11's bag
+  (`S11BodyB`, measured: 3,041 triangles, 0.32 x 0.39 x 0.30 m at z 1.00-1.30).
+  Such a part now renders neutral with the "no diffuse texture is shipped for
+  this part" warning. What the game's own loader paints there comes from its own
+  texture state, which this code does not model, so the preview claims nothing
+  about it: an unbound slice is simply not painted with somebody else's atlas.
 - **Menu-driven toggles:** a mod needs no `[Key*]` section to expose controls.
   When the mod assigns a flag from itself (`$jacket = 1 - $jacket`,
   `$color = $color + 1`) — the idiom the in-game slot menu uses — that flag is
