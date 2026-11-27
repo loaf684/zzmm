@@ -3,6 +3,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { BrowsePage } from "@/features/browse/BrowsePage";
+import { FixerPage } from "@/features/fixer/FixerPage";
 import { ModDetailPage } from "@/features/browse/ModDetailPage";
 import { InstalledPage } from "@/features/installed/InstalledPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="/browse" element={<BrowsePage />} />
           <Route path="/browse/:modId" element={<ModDetailPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/fixer" element={<FixerPage />} />
           {/* Old dedicated pages now live inside the mod detail panel. */}
           <Route path="/hotkeys" element={<Navigate to="/installed" replace />} />
           <Route path="/preview" element={<Navigate to="/installed" replace />} />
