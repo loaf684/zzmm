@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   Compass,
@@ -17,8 +17,12 @@ import { Panel } from "@/components/ui/Panel";
 import { SuggestionInput } from "@/components/ui/SuggestionInput";
 import { cn } from "@/lib/cn";
 import { useBrowseStore } from "@/store/browse";
-import type { BrowseSort } from "@/types/gamebanana";
+import { useModsStore } from "@/store/mods";
+import type { BrowseSort, ModSummary } from "@/types/gamebanana";
 import { BrowseCard, BrowseCardSkeleton } from "./BrowseCard";
+import { BrowseHero } from "./BrowseHero";
+import type { BrowseStats } from "./BrowseHero";
+import { BrowseRail } from "./BrowseRail";
 
 const SORT_GROUPS: { label: string; options: { value: BrowseSort; label: string }[] }[] = [
   {
@@ -117,6 +121,8 @@ export function BrowsePage() {
   const loadMore = useBrowseStore((state) => state.loadMore);
   const loadCategories = useBrowseStore((state) => state.loadCategories);
 
+  const modsResult = useModsStore((state) => state.result);
+
   const navigate = useNavigate();
   const [searchInput, setSearchInput] = useState(filters.search);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -153,6 +159,40 @@ export function BrowsePage() {
   const activeFilters = Boolean(
     filters.search || filters.character || filters.categoryId !== null,
   );
+
+  // The unfiltered feed opens as a storefront: one featured card, then a shelf
+  // per category taken from the items already loaded (no extra API calls).
+  const showStorefront = !activeFilters && items.length > 0;
+  const hero = showStorefront ? items[0] : null;
+
+  const stats = useMemo<BrowseStats>(() => {
+    const mods = modsResult?.mods ?? [];
+    const characters = new Set(
+      mods.map((mod) => mod.character).filter((name): name is string => Boolean(name)),
+    );
+    return {
+      installed: mods.length,
+      characters: characters.size,
+      conflicts: modsResult?.conflicts.length ?? 0,
+    };
+  }, [modsResult]);
+
+  const rails = useMemo<Array<[string, ModSummary[]]>>(() => {
+    if (!showStorefront) return [];
+    const featuredId = items[0]?.id;
+    const groups = new Map<string, ModSummary[]>();
+    for (const mod of items) {
+      if (mod.id === featuredId) continue;
+      const key = mod.category ?? "Other";
+      const list = groups.get(key);
+      if (list) list.push(mod);
+      else groups.set(key, [mod]);
+    }
+    return [...groups.entries()]
+      .filter(([, list]) => list.length >= 3)
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 3);
+  }, [showStorefront, items]);
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-8 py-8">
@@ -211,6 +251,16 @@ export function BrowsePage() {
           </Button>
         </div>
       </header>
+
+      {hero ? (
+        <div className="mt-7">
+          <BrowseHero
+            mod={hero}
+            stats={stats}
+            onOpen={() => navigate(`/browse/${hero.id}`)}
+          />
+        </div>
+      ) : null}
 
       <div className="mt-7 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[240px] flex-1">
@@ -362,6 +412,28 @@ export function BrowsePage() {
             </Button>
           </div>
         </Panel>
+      ) : null}
+
+      {rails.map(([category, mods]) => (
+        <BrowseRail
+          key={category}
+          title={category}
+          items={mods}
+          onOpen={(modId) => navigate(`/browse/${modId}`)}
+          onSeeAll={() => {
+            const match = categories.find(
+              (candidate) => candidate.name.toLowerCase() === category.toLowerCase(),
+            );
+            if (match) setCategory(match.id);
+            else setSearch(category);
+          }}
+        />
+      ))}
+
+      {showStorefront ? (
+        <h2 className="mt-9 font-display text-[15px] uppercase tracking-[0.16em] text-zinc-300">
+          Everything else
+        </h2>
       ) : null}
 
       {items.length > 0 ? (
