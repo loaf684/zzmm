@@ -29,6 +29,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { Notice } from "@/components/ui/Notice";
+import { SectionHeading } from "@/components/ui/SectionHeading";
 import { SuggestionInput } from "@/components/ui/SuggestionInput";
 import { Switch } from "@/components/ui/Switch";
 import { KeyCapture } from "@/features/hotkeys/KeyCapture";
@@ -43,6 +44,7 @@ import { usePreviewStore } from "@/store/preview";
 import { toast } from "@/store/toasts";
 import type { InstalledMod, ModHotkey } from "@/types/mods";
 import type { PreviewToggle } from "@/types/preview";
+import { HashFixPanel } from "./HashFixPanel";
 import { describeHotkey } from "./hotkeyLabels";
 
 interface ModDetailPanelProps {
@@ -1406,6 +1408,8 @@ export function ModDetailPanel({
               ) : null}
             </section>
 
+            <HashFixPanel folderName={mod.folderName} />
+
             <section aria-label="Notes">
               <SectionHeading
                 title="Notes"
@@ -1601,23 +1605,6 @@ function StageToggle({
     >
       {label}
     </button>
-  );
-}
-
-function SectionHeading({
-  title,
-  action,
-}: {
-  title: ReactNode;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <h3 className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
-        {title}
-      </h3>
-      {action}
-    </div>
   );
 }
 

@@ -1,3 +1,4 @@
+import { fixerApi } from "@/lib/api/fixer";
 import { gamebananaApi } from "@/lib/api/gamebanana";
 import { iniApi } from "@/lib/api/ini";
 import { installerApi } from "@/lib/api/installer";
@@ -13,6 +14,7 @@ export const api = {
   gamebanana: gamebananaApi,
   ini: iniApi,
   preview: previewApi,
+  fixer: fixerApi,
 };
 
 export { ApiError } from "@/lib/api/client";

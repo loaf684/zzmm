@@ -222,6 +222,53 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
   Browse and Settings. The sidebar uses the real app icon and puts search,
   status and the character list at the top-left.
 
+### Outdated-hash fixer
+
+Game patches renumber the buffer and texture hashes a mod matches on. An INI
+section such as `[TextureOverrideJaneHairIB]` with `hash = 9268a5af` simply stops
+matching, and the part disappears in game without an error. The detail panel's
+**Hash fixer** row checks one mod and can rewrite those values.
+
+- **Data**: `src-tauri/src/mods/fixer_hash_map.json` maps an outdated 8-hex
+  value to the current one for game 3.1 (567 pairs, generated 2026-11-27).
+  `scripts/generate-fixer-hash-map.py` rebuilds it from a
+  [ZZZ-Mod-Fixer](https://github.com/Vonksdesu/ZZZ-Mod-Fixer) checkout:
+  `python scripts/generate-fixer-hash-map.py <checkout>`. The `meta` block records
+  the target version, upstream commit and generation date; the panel shows the
+  version so a stale table is visible.
+- **Which pairs survive**: renames are followed to a fixpoint *inside one
+  character module*, then the generator drops pairs with conflicting targets,
+  pairs whose old value is another pair's target, and pairs whose old value the
+  current game database still lists. Upstream merges all characters into one
+  table and only warns about collisions; a global merge would rewrite hashes
+  that are still correct (e.g. `ebac056e` is the current 2048p NormalMap hash for
+  most characters but an outdated Belle-Temple/Wise-Temple value). Every dropped
+  pair is a missed fix, never a wrong rewrite.
+- **What is rewritten**: only uncommented `hash = <value>` lines. Line endings,
+  indentation, key casing and trailing comments are preserved, and the file's
+  encoding (UTF-8, UTF-8 BOM, UTF-16LE, Latin-1) round-trips through the existing
+  `ini_parser::text` helpers. A line that is already current is left alone.
+- **Files covered**: the same collector as hotkeys and the 3D preview (up to four
+  levels, 400 files), minus `DISABLED*.ini` and `desktop.ini`.
+- **Writes**: `scan_mod_hash_fixes` is read-only. `apply_mod_hash_fixes` copies
+  each changed file to `<file>.ini.bak` through `text::backup_once` (never
+  overwriting an existing backup) and then writes atomically; a failure on one
+  file is reported per file instead of aborting the mod. Nothing is written when
+  no value matches, so a second run is a no-op. `restore_mod_ini_backups`
+  restores every INI whose `.bak` differs from the current bytes, which also
+  undoes an earlier hotkey edit to that file — the backup is ZZMM's first-write
+  original, not a hash-fixer-specific copy.
+- **Limits**: only hash values are repaired. Upstream additionally adds missing
+  sections, multiplies sections for equivalent hashes, injects
+  `run = CommandListSkinTexture` and patches vertex/index buffers; those steps
+  depend on upstream's GPL-3.0 section templates and are not bundled. A mod whose
+  parts are missing for those reasons reports **No outdated hashes found** rather
+  than claiming a fix.
+- **Licensing**: upstream code and data are GPL-3.0 while ZZMM is MIT, so this
+  feature ships only a derived list of hex pairs (game-derived facts, with
+  attribution), not upstream source, templates or command tables. Refresh the
+  table by re-running the generator, not by copying upstream files.
+
 ### Installing archives
 
 - Drop `.zip`, `.7z`, or `.rar` files **anywhere in the window**. Multiple files
@@ -469,6 +516,9 @@ IPC commands:
 | `save_mod_ini_raw`   | Raw save endpoint, not exposed in the UI              |
 | `update_ini_setting` | Change/insert one setting, losslessly (hotkey saves)   |
 | `scan_hotkey_conflicts` | Bindings from all enabled mods that overlap        |
+| `scan_mod_hash_fixes` | Read-only check for outdated `hash = ...` values     |
+| `apply_mod_hash_fixes` | Rewrite outdated values, backing up each INI once   |
+| `restore_mod_ini_backups` | Restore every INI that has an `.ini.bak`      |
 | `load_mod_preview`   | Buffers + textures for one mod; accepts toggle overrides |
 
 ## Thumbnail access (asset protocol)

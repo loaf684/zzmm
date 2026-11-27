@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::error::{AppError, AppResult};
+use crate::mods::hash_fix::{self, FixApplyResult, FixRestoreResult, FixScan};
 use crate::mods::loadouts::{self, LoadoutApplyResult, LoadoutSummary};
 use crate::mods::model::{
     ApplyModStatesResult, CharacterAssignResult, ModDetails, ModScanResult, ModStateFailure,
@@ -368,6 +369,55 @@ pub async fn apply_loadout(
             failed,
             backup_file: backup.map(|path| path.to_string_lossy().to_string()),
         })
+    })
+    .await
+    .map_err(|error| AppError::Task(error.to_string()))?
+}
+
+/// Read-only check for hash values that the current game version replaced.
+#[tauri::command]
+pub async fn scan_mod_hash_fixes(
+    state: State<'_, AppState>,
+    folder_name: String,
+) -> AppResult<FixScan> {
+    let dir = mods_dir(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = actions::mod_dir(&dir, &folder_name)?;
+        hash_fix::scan(&folder_name, &root)
+    })
+    .await
+    .map_err(|error| AppError::Task(error.to_string()))?
+}
+
+/// Rewrite every outdated `hash = ...` value in one mod, backing up each INI
+/// once. Reports per-file failures instead of aborting the whole mod.
+#[tauri::command]
+pub async fn apply_mod_hash_fixes(
+    state: State<'_, AppState>,
+    folder_name: String,
+) -> AppResult<FixApplyResult> {
+    let dir = mods_dir(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = actions::mod_dir(&dir, &folder_name)?;
+        hash_fix::apply(&folder_name, &root)
+    })
+    .await
+    .map_err(|error| AppError::Task(error.to_string()))?
+}
+
+/// Restore every INI that still has a `.ini.bak`.
+#[tauri::command]
+pub async fn restore_mod_ini_backups(
+    state: State<'_, AppState>,
+    folder_name: String,
+) -> AppResult<FixRestoreResult> {
+    let dir = mods_dir(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = actions::mod_dir(&dir, &folder_name)?;
+        hash_fix::restore_backups(&folder_name, &root)
     })
     .await
     .map_err(|error| AppError::Task(error.to_string()))?
