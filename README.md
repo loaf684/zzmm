@@ -56,9 +56,9 @@ Download a prebuilt release:
 
 | Asset | Notes |
 | --- | --- |
-| `ZZMM_0.1.0_x64-setup.exe` | NSIS installer; per-user, no administrator prompt |
-| `ZZMM_0.1.0_x64_en-US.msi` | Windows Installer package |
-| `ZZMM_0.1.0_x64_portable.exe` | Standalone; nothing installed, needs WebView2 |
+| `ZZMM_0.1.2_x64-setup.exe` | NSIS installer; per-user, no administrator prompt |
+| `ZZMM_0.1.2_x64_en-US.msi` | Windows Installer package |
+| `ZZMM_0.1.2_x64_portable.exe` | Standalone; nothing installed, needs WebView2 |
 
 Builds are unsigned, so Windows SmartScreen may warn about an unknown publisher.
 
@@ -77,8 +77,8 @@ pnpm tauri build    # build zzmm.exe and the installers
 | Artifact | Path |
 | --- | --- |
 | Portable | `src-tauri/target/release/zzmm.exe` |
-| NSIS | `src-tauri/target/release/bundle/nsis/ZZMM_0.1.0_x64-setup.exe` |
-| MSI | `src-tauri/target/release/bundle/msi/ZZMM_0.1.0_x64_en-US.msi` |
+| NSIS | `src-tauri/target/release/bundle/nsis/ZZMM_0.1.2_x64-setup.exe` |
+| MSI | `src-tauri/target/release/bundle/msi/ZZMM_0.1.2_x64_en-US.msi` |
 
 ## Quick start
 

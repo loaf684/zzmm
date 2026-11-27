@@ -67,8 +67,8 @@ Artifacts (release profile: LTO, `opt-level = "s"`, symbols stripped):
 
 | Artifact | Path |
 | -------- | ---- |
-| NSIS installer | `src-tauri/target/release/bundle/nsis/ZZMM_0.1.0_x64-setup.exe` |
-| MSI installer | `src-tauri/target/release/bundle/msi/ZZMM_0.1.0_x64_en-US.msi` |
+| NSIS installer | `src-tauri/target/release/bundle/nsis/ZZMM_0.1.2_x64-setup.exe` |
+| MSI installer | `src-tauri/target/release/bundle/msi/ZZMM_0.1.2_x64_en-US.msi` |
 | Portable exe | `src-tauri/target/release/zzmm.exe` (needs WebView2 on the machine) |
 
 The installers are per-user (`nsis.installMode: currentUser`), so they install
