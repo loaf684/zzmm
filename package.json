@@ -1,7 +1,7 @@
 {
   "name": "zzmm",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "ZZMM - a desktop mod manager for Zenless Zone Zero (ZZMI / XXMI)",
   "scripts": {
