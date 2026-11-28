@@ -96,6 +96,9 @@ pub enum AppError {
     #[error("Invalid INI path or section: {0}")]
     IniPath(String),
 
+    #[error("No undo snapshot is stored for that mod: {0}")]
+    UndoNotFound(String),
+
     #[error("Could not build a 3D preview: {0}")]
     Preview(String),
 
@@ -138,6 +141,7 @@ impl Serialize for AppError {
             AppError::Download(_) => "download_error",
             AppError::IniNotFound(_) => "ini_not_found",
             AppError::IniPath(_) => "ini_path_error",
+            AppError::UndoNotFound(_) => "undo_not_found",
             AppError::Preview(_) => "preview_error",
             AppError::Texture(_) => "texture_error",
         };

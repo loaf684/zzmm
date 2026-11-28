@@ -40,12 +40,14 @@ export interface FixerFile {
   unsupported: FixerUnsupported[];
   /** The fixer database wants a buffer-level change that v1 does not apply. */
   needsBufferPass: boolean;
-  /** True when an apply will not touch this file at all. */
+  /**
+   * True when every remaining recommendation is ignored one by one. The file
+   * stays listed so those fixes can be seen and unignored; nothing is written.
+   */
   ignored: boolean;
   /**
-   * What ignores it: `mod` (whole mod folder), `file` (this ini) or `fix`
-   * (every remaining recommendation of this ini is ignored). Absent or `null`
-   * when the file is not ignored.
+   * `fix` when every remaining recommendation is ignored one by one. A file or
+   * mod ignore is never reported: those rows are hidden from the scan.
    */
   ignoredScope?: IgnoreScope | null;
   /** Set when the file could not be read; nothing was written for it. */
@@ -55,6 +57,8 @@ export interface FixerFile {
 export interface FixerScanResult {
   scanned: number;
   skipped: number;
+  /** Inis hidden because the ignore list covers the mod or the file. */
+  ignored: number;
   files: FixerFile[];
 }
 
@@ -62,9 +66,14 @@ export interface FixerApplied {
   iniPath: string;
   folder: string;
   character: string;
-  /** Unix seconds of the run; with `iniPath` it identifies the history entry. */
+  /** Unix seconds of the run. */
   fixedAt: number;
-  backupPath: string | null;
+  /**
+   * True when this file's pre-fix bytes are in its mod's snapshot, so undoing
+   * the mod puts it back. False when no snapshot was asked for or storing it
+   * failed.
+   */
+  snapshot: boolean;
   /** Only the changes that were actually written. */
   updated: FixerHashChange[];
   additions: FixerSectionAddition[];
@@ -77,7 +86,7 @@ export interface FixerApplyResult {
   ignored: string[];
 }
 
-export interface FixerRollbackResult {
+export interface FixerUndoResult {
   restored: string[];
   failed: { iniPath: string; error: string }[];
 }
@@ -94,23 +103,22 @@ export interface FixerIgnoredEntry {
   ignoredAt: number;
 }
 
-/** One successful fix as stored, with its backup checked on disk right now. */
-export interface FixerHistoryEntry {
-  iniPath: string;
+/**
+ * The one restorable state a mod has: how it was right before its most recent
+ * fix. A new fix replaces it instead of adding another.
+ */
+export interface FixerSnapshotEntry {
   folder: string;
-  character: string;
-  backupPath?: string | null;
-  /** False when no backup was kept, it was deleted, or it was already used. */
-  backupAvailable: boolean;
-  fixedAt: number;
-  updated: number;
-  additions: number;
-  restoredAt?: number | null;
+  /** Unix seconds the originals were read. */
+  capturedAt: number;
+  /** How many inis an undo puts back. */
+  files: number;
+  iniPaths: string[];
 }
 
-/** The ignore list and the fix history, both persisted in the app config. */
+/** The ignore list and the mods an undo can still put back. */
 export interface FixerStateView {
   ignored: FixerIgnoredEntry[];
-  /** Newest first. */
-  history: FixerHistoryEntry[];
+  /** Newest capture first. */
+  snapshots: FixerSnapshotEntry[];
 }

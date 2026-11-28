@@ -1,10 +1,11 @@
 //! Tauri commands for the mod fixer. Thin wrappers: all the work happens on a
 //! blocking thread so a large Mods folder never stalls the webview.
 //!
-//! The ignore list and the fix history live in one JSON file in the app config
-//! folder (`fixer::store`). Commands read it before a scan/apply and write it
-//! after an apply or a restore; the file is the only thing ignoring a mod
-//! touches.
+//! The ignore list lives in one JSON file in the app config folder
+//! (`fixer::store`), the per-mod undo snapshots in `fixer-undo` beside it
+//! (`fixer::undo`). Commands read them before a scan/apply and write them after
+//! an apply, an ignore toggle or an undo; nothing outside those folders is
+//! touched by ignoring a mod.
 
 use std::path::Path;
 
@@ -12,15 +13,15 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::fixer::model::{
-    FixerApplyResult, FixerFailure, FixerHistoryRecord, FixerIgnoredEntry, FixerRollbackResult,
-    FixerScanResult, FixerStateView,
+    FixerApplyResult, FixerIgnoredEntry, FixerScanResult, FixerStateView, FixerUndoResult,
 };
 use crate::fixer::store::{self, IgnoreSet};
-use crate::fixer::{backup, ops};
+use crate::fixer::ops;
 use crate::state::AppState;
+use crate::util::unix_now;
 
-/// Read-only scan of a Mods folder: nothing is written, not even a backup.
-/// Files the ignore list covers are still reported, marked as ignored.
+/// Read-only scan of a Mods folder: nothing is written, not even a snapshot.
+/// INIs the ignore list covers whole are counted, not listed.
 #[tauri::command]
 pub async fn fixer_scan(
     state: State<'_, AppState>,
@@ -34,56 +35,60 @@ pub async fn fixer_scan(
     .await
 }
 
-/// Rewrite the named INIs. With `backup`, each original is moved into the
-/// loader's backup folder first. Ignored files are left alone, and every file
-/// that was written is appended to the history the UI can restore from.
+/// Rewrite the named INIs. With `snapshot`, the pre-fix bytes of every file
+/// written are stored as its mod's single undo snapshot, replacing the previous
+/// one; without it, a stale snapshot for a written mod is dropped.
+/// Ignored files are left alone.
 #[tauri::command]
 pub async fn fixer_apply(
     state: State<'_, AppState>,
     mods_dir: String,
     ini_paths: Vec<String>,
-    backup: bool,
+    snapshot: bool,
 ) -> AppResult<FixerApplyResult> {
     let config_dir = state.paths.config_dir.clone();
     blocking(move || {
-        let state_file = store::path_in(&config_dir);
-        let mut persisted = store::load(&state_file);
-        let ignored = IgnoreSet::from_state(&persisted);
-
-        let result = ops::apply(Path::new(&mods_dir), &ini_paths, backup, &ignored)?;
-
-        if !result.applied.is_empty() {
-            let records: Vec<FixerHistoryRecord> =
-                result.applied.iter().map(FixerHistoryRecord::from).collect();
-            store::append_history(&mut persisted, records);
-            // The INIs are already written; a history file that cannot be saved
-            // is worth a log line, not a failed run.
-            if let Err(error) = store::save(&state_file, &persisted) {
-                log::warn!("Could not record the fixer history: {error}");
-            }
-        }
-
-        Ok(result)
+        let ignored = IgnoreSet::from_state(&store::load(&store::path_in(&config_dir)));
+        ops::apply(
+            Path::new(&mods_dir),
+            &config_dir,
+            &ini_paths,
+            snapshot,
+            &ignored,
+        )
     })
     .await
 }
 
-/// Put the backups back over the INIs they came from. Restores the newest
-/// backup per file; the history menu restores one specific recorded fix.
+/// Put one mod back from its undo snapshot - the state right before its most
+/// recent fix. Files that come back are consumed; the rest stay restorable.
 #[tauri::command]
-pub async fn fixer_rollback(
+pub async fn fixer_undo(
+    state: State<'_, AppState>,
     mods_dir: String,
-    ini_paths: Vec<String>,
-) -> AppResult<FixerRollbackResult> {
-    blocking(move || ops::rollback(Path::new(&mods_dir), &ini_paths)).await
+    folder: String,
+) -> AppResult<FixerUndoResult> {
+    if folder.trim().is_empty() {
+        return Err(AppError::InvalidModFolder(folder));
+    }
+
+    let config_dir = state.paths.config_dir.clone();
+    blocking(move || ops::undo(Path::new(&mods_dir), &config_dir, &folder)).await
 }
 
-/// The ignore list and the restore history, for the Mod Fixer page. Reads disk
-/// only: whether a backup is still there is answered per call, not cached.
+/// The ignore list and the mods an undo can still put back, for the Mod Fixer
+/// page. Reads disk only: whether a snapshot is still there is answered per
+/// call, not cached.
 #[tauri::command]
 pub async fn fixer_state(state: State<'_, AppState>) -> AppResult<FixerStateView> {
     let config_dir = state.paths.config_dir.clone();
-    blocking(move || Ok(store::view(&store::load(&store::path_in(&config_dir))))).await
+    blocking(move || {
+        Ok(store::view(
+            &config_dir,
+            &store::load(&store::path_in(&config_dir)),
+        ))
+    })
+    .await
 }
 
 /// Add or remove an ignore entry: a whole mod (`ini_path` and `key` absent),
@@ -118,63 +123,14 @@ pub async fn fixer_ignore(
             ini_path,
             key,
             label,
-            ignored_at: backup::now_seconds(),
+            ignored_at: unix_now(),
         };
 
         store::set_ignored(&mut persisted, entry, ignored);
         store::save(&state_file, &persisted)?;
         log::info!("Fixer ignore list updated ({ignored})");
 
-        Ok(store::view(&persisted))
-    })
-    .await
-}
-
-/// Put the original INI back from the backup one recorded fix wrote.
-///
-/// `fixedAt` with `iniPath` identifies the history entry; its backup path comes
-/// from the stored record, so the UI can never point a restore at another file.
-#[tauri::command]
-pub async fn fixer_restore(
-    state: State<'_, AppState>,
-    mods_dir: String,
-    ini_path: String,
-    fixed_at: u64,
-) -> AppResult<FixerRollbackResult> {
-    let config_dir = state.paths.config_dir.clone();
-    blocking(move || {
-        let state_file = store::path_in(&config_dir);
-        let mut persisted = store::load(&state_file);
-        let mut result = FixerRollbackResult {
-            restored: Vec::new(),
-            failed: Vec::new(),
-        };
-
-        let Some(record) = store::find_history(&persisted, &ini_path, fixed_at).cloned() else {
-            result.failed.push(FixerFailure {
-                ini_path,
-                error: "No fix with that history entry is recorded.".to_string(),
-            });
-            return Ok(result);
-        };
-
-        match ops::restore_history(Path::new(&mods_dir), &record) {
-            Ok(restored_from) => {
-                log::info!(
-                    "Fixer history: {} restored from {}",
-                    record.ini_path,
-                    restored_from.display()
-                );
-                store::mark_restored(&mut persisted, &ini_path, fixed_at, backup::now_seconds());
-                if let Err(error) = store::save(&state_file, &persisted) {
-                    log::warn!("Could not record the restore in the fixer history: {error}");
-                }
-                result.restored.push(ini_path);
-            }
-            Err(error) => result.failed.push(FixerFailure { ini_path, error }),
-        }
-
-        Ok(result)
+        Ok(store::view(&config_dir, &persisted))
     })
     .await
 }

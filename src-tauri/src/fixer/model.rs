@@ -1,7 +1,7 @@
 //! Data shapes crossing the IPC bridge for the mod fixer.
 //!
 //! Field names are fixed by the UI that consumes them (`fixerScan`,
-//! `fixerApply`, `fixerRollback`); extra fields may be added, existing ones must
+//! `fixerApply`, `fixerUndo`); extra fields may be added, existing ones must
 //! keep their meaning.
 
 use serde::{Deserialize, Serialize};
@@ -72,12 +72,13 @@ pub struct FixerFileReport {
     pub unsupported: Vec<UnsupportedCommand>,
     /// True when at least one fix needs the `.buf` pass v1 does not implement.
     pub needs_buffer_pass: bool,
-    /// True when the user told the fixer to leave this file alone. The fixes are
-    /// still listed so they stay visible, but `fixer_apply` never writes the
-    /// file, and it is not selected by default.
+    /// True when the ignore list covers *every* recommendation this file has,
+    /// one by one. The fixes stay listed so the user can see and unignore them;
+    /// `fixer_apply` writes nothing for such a file. Files ignored as a whole
+    /// (mod or INI scope) are not listed at all - see `FixerScanResult::ignored`.
     pub ignored: bool,
-    /// What matched the ignore list: `"mod"` when the whole mod folder is
-    /// ignored, `"file"` when only this INI is. `None` when not ignored.
+    /// What matched the ignore list: `"fix"` when every remaining
+    /// recommendation is ignored one by one. `None` when nothing is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignored_scope: Option<String>,
     /// Set when the file could not be processed at all; `updated`/`additions`
@@ -93,6 +94,10 @@ pub struct FixerScanResult {
     pub scanned: u32,
     /// `.ini` files ignored by the loader's own rules (`DISABLED*`, `DESKTOP*`).
     pub skipped: u32,
+    /// `.ini` files hidden because the ignore list covers the mod or the file.
+    /// Counted so the UI can point at the ignore list below instead of showing
+    /// rows the user asked to stop seeing.
+    pub ignored: u32,
     /// Outdated files, or files that could not be read.
     pub files: Vec<FixerFileReport>,
 }
@@ -102,16 +107,17 @@ pub struct FixerScanResult {
 #[serde(rename_all = "camelCase")]
 pub struct FixerApplied {
     pub ini_path: String,
-    /// Mod folder the INI belongs to; carried so the history entry can be shown
-    /// after the mod itself is gone from a later scan.
+    /// Mod folder the INI belongs to; the mod's undo snapshot covers the files
+    /// this run wrote under it.
     pub folder: String,
     /// Primary character from the fix data, as the scan reports it.
     pub character: String,
-    /// Unix seconds of this apply run; with `iniPath` it identifies the history
-    /// entry a restore request means.
+    /// Unix seconds of this apply run.
     pub fixed_at: u64,
-    /// Backup that now holds the pre-fix file; `None` when `backup` was false.
-    pub backup_path: Option<String>,
+    /// True when the pre-fix bytes of this file are in the mod's snapshot, i.e.
+    /// when "undo the last fix" now puts it back. False when no snapshot was
+    /// asked for, or when storing one failed.
+    pub snapshot: bool,
     /// Only the changes that were actually written; ignored ones are left out.
     pub updated: Vec<HashUpdate>,
     pub additions: Vec<SectionAddition>,
@@ -150,9 +156,8 @@ pub struct FixerApplyResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FixerRollbackResult {
-    /// INI paths put back, in the order they were requested - the shape the
-    /// Mod Fixer screen reads.
+pub struct FixerUndoResult {
+    /// INI paths put back from the mod's snapshot.
     pub restored: Vec<String>,
     pub failed: Vec<FixerFailure>,
 }
@@ -181,64 +186,26 @@ pub struct FixerIgnoredEntry {
     pub ignored_at: u64,
 }
 
-/// One successful fix, as stored. The backup path is the only thing a restore
-/// needs; it is never taken from the UI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FixerHistoryRecord {
-    pub ini_path: String,
-    pub folder: String,
-    pub character: String,
-    #[serde(default)]
-    pub backup_path: Option<String>,
-    pub fixed_at: u64,
-    pub updated: u32,
-    pub additions: u32,
-    /// Set when this fix was undone through the history menu.
-    #[serde(default)]
-    pub restored_at: Option<u64>,
-}
-
-impl From<&FixerApplied> for FixerHistoryRecord {
-    fn from(applied: &FixerApplied) -> Self {
-        Self {
-            ini_path: applied.ini_path.clone(),
-            folder: applied.folder.clone(),
-            character: applied.character.clone(),
-            backup_path: applied.backup_path.clone(),
-            fixed_at: applied.fixed_at,
-            updated: applied.updated.len() as u32,
-            additions: applied.additions.len() as u32,
-            restored_at: None,
-        }
-    }
-}
-
-/// A stored fix, plus whether its backup is still on disk *right now* - the
-/// only honest answer to "can this be restored?".
+/// The one restorable snapshot a mod has: the state right before its most
+/// recent fix. Applying again on the same mod replaces it, so the list never
+/// grows with the number of runs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FixerHistoryEntry {
-    pub ini_path: String,
+pub struct FixerSnapshotEntry {
     pub folder: String,
-    pub character: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup_path: Option<String>,
-    /// False when no backup was kept, the file was deleted, or another restore
-    /// already consumed it.
-    pub backup_available: bool,
-    pub fixed_at: u64,
-    pub updated: u32,
-    pub additions: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub restored_at: Option<u64>,
+    pub captured_at: u64,
+    /// How many INIs the snapshot restores.
+    pub files: u32,
+    /// Those INIs, in capture order.
+    pub ini_paths: Vec<String>,
 }
 
 /// Everything the Mod Fixer screen keeps between visits: the ignore list and
-/// the history of successful fixes, newest first.
+/// the mods an undo can still put back.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FixerStateView {
     pub ignored: Vec<FixerIgnoredEntry>,
-    pub history: Vec<FixerHistoryEntry>,
+    /// Newest first.
+    pub snapshots: Vec<FixerSnapshotEntry>,
 }
