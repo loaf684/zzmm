@@ -61,6 +61,11 @@ export function BrowseCard({ mod, view = "grid", onOpen }: BrowseCardProps) {
               new
             </span>
           ) : null}
+          {mod.nsfw === "nsfw" ? (
+            <span className="absolute right-1 top-1 rounded border border-hot-500/40 bg-hot-500/20 px-1 py-0.5 font-display text-[8px] uppercase tracking-[0.12em] text-hot-300">
+              NSFW
+            </span>
+          ) : null}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -138,6 +143,11 @@ export function BrowseCard({ mod, view = "grid", onOpen }: BrowseCardProps) {
           {!mod.hasFiles ? (
             <span className="rounded-md border border-ink-600/70 bg-ink-950/80 px-1.5 py-0.5 font-display text-[8.5px] uppercase tracking-[0.14em] text-zinc-400 backdrop-blur">
               no files
+            </span>
+          ) : null}
+          {mod.nsfw === "nsfw" ? (
+            <span className="rounded-md border border-hot-500/40 bg-hot-500/20 px-1.5 py-0.5 font-display text-[8.5px] uppercase tracking-[0.14em] text-hot-300 backdrop-blur">
+              NSFW
             </span>
           ) : null}
         </div>

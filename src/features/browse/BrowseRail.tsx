@@ -67,6 +67,11 @@ function RailCard({ mod, onOpen }: RailCardProps) {
               no files
             </span>
           ) : null}
+          {mod.nsfw === "nsfw" ? (
+            <span className="shrink-0 rounded border border-hot-500/40 bg-hot-500/20 px-1 py-0.5 font-display text-[8px] uppercase tracking-[0.12em] text-hot-300">
+              NSFW
+            </span>
+          ) : null}
         </p>
         <div className="mt-2 flex items-center gap-3 font-mono text-[10px] text-zinc-500">
           <span className="inline-flex items-center gap-1">

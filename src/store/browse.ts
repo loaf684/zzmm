@@ -7,11 +7,13 @@ import type {
   CategoryChip,
   ModDetail,
   ModSummary,
+  NsfwFilter,
 } from "@/types/gamebanana";
 
 export type BrowseView = "grid" | "list";
 
 const VIEW_STORAGE_KEY = "zzmm.browseView";
+const NSFW_STORAGE_KEY = "zzmm.browseNsfw";
 
 function readStoredView(): BrowseView {
   try {
@@ -21,11 +23,25 @@ function readStoredView(): BrowseView {
   }
 }
 
+/** The content filter is a privacy preference, so it sticks like the view
+ *  choice does. Default SFW: the browser is safe until the user asks for more. */
+function readStoredNsfw(): NsfwFilter {
+  try {
+    const stored = localStorage.getItem(NSFW_STORAGE_KEY);
+    return stored === "all" || stored === "nsfw" || stored === "sfw"
+      ? stored
+      : "sfw";
+  } catch {
+    return "sfw";
+  }
+}
+
 export interface BrowseFilters {
   search: string;
   sort: BrowseSort;
   categoryId: number | null;
   character: string;
+  nsfw: NsfwFilter;
 }
 
 /** One trending shelf: the dashboard's own trending feed, grouped by the root
@@ -72,6 +88,7 @@ interface BrowseStore {
   setSort: (value: BrowseSort) => void;
   setCategory: (id: number | null) => void;
   setCharacter: (value: string) => void;
+  setNsfw: (value: NsfwFilter) => void;
   setView: (view: BrowseView) => void;
   refresh: () => void;
   loadMore: () => void;
@@ -85,6 +102,9 @@ interface BrowseStore {
 
 /** Guards against out-of-order responses when filters change mid-request. */
 let requestSeq = 0;
+/** Same, for the storefront feed: a content-mode change must not let an older
+ *  trending response publish shelves for the wrong mode. */
+let railsSeq = 0;
 
 function mergeUnique(existing: ModSummary[], incoming: ModSummary[]): ModSummary[] {
   const seen = new Set(existing.map((item) => item.id));
@@ -117,6 +137,7 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
             null)
           : null,
         character: filters.character.trim() || null,
+        nsfw: filters.nsfw,
       });
 
       // A newer request superseded this one.
@@ -156,7 +177,7 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
   };
 
   return {
-    filters: { search: "", sort: "newest", categoryId: null, character: "" },
+    filters: { search: "", sort: "newest", categoryId: null, character: "", nsfw: readStoredNsfw() },
     view: readStoredView(),
     categories: [],
     categoryError: null,
@@ -196,6 +217,26 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
     setCharacter: (value) => {
       if (get().filters.character === value) return;
       applyFilters({ character: value });
+    },
+
+    setNsfw: (value) => {
+      if (get().filters.nsfw === value) return;
+
+      set((state) => ({ filters: { ...state.filters, nsfw: value } }));
+      try {
+        localStorage.setItem(NSFW_STORAGE_KEY, value);
+      } catch {
+        // A blocked localStorage only costs us the remembered preference.
+      }
+
+      // The mode is a privacy boundary, so drop the current rows and shelves
+      // instead of leaving the previous mode's thumbnails on screen until the
+      // new feed arrives.
+      set({ items: [], cursor: null, hasMore: false, rails: [] });
+      void fetchPage(false);
+      // The storefront is its own trending feed; reload it under the new mode
+      // so the hero and shelves never show excluded content.
+      void get().loadRails(true);
     },
 
     setView: (view) => {
@@ -249,9 +290,13 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
 
     loadRails: async (force = false) => {
       const state = get();
-      if (state.railsLoading) return;
+      if (state.railsLoading && !force) return;
       if (state.rails.length > 0 && !force) return;
 
+      // A forced reload (Refresh, or a content-mode change) supersedes any
+      // in-flight one; the sequence check below drops the older response.
+      const seq = ++railsSeq;
+      const nsfw = state.filters.nsfw;
       set({ railsLoading: true, railsError: null });
 
       // Shelf headings are real category names, so the list has to settle first
@@ -262,7 +307,11 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
       // "Load more" cannot relabel or reshuffle the shelves under the pointer.
       const pages = await Promise.allSettled(
         Array.from({ length: SHELF_PAGES }, (_, index) =>
-          api.gamebanana.browse({ cursor: index + 1, sort: "trending" }),
+          api.gamebanana.browse({
+            cursor: index + 1,
+            sort: "trending",
+            nsfw,
+          }),
         ),
       );
 
@@ -283,6 +332,8 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
       );
 
       if (feed.length === 0) {
+        // A newer load (or a mode change) already owns the state.
+        if (seq !== railsSeq) return;
         set({
           rails: [],
           railsLoading: false,
@@ -337,6 +388,8 @@ export const useBrowseStore = create<BrowseStore>((set, get) => {
           items: rest.slice(0, SHELF_LIMIT),
         });
       }
+
+      if (seq !== railsSeq) return;
 
       set({
         rails: shelves,

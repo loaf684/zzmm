@@ -4,8 +4,8 @@ use std::time::Duration;
 use crate::api::cache;
 use crate::api::client::{encode, get_json};
 use crate::api::model::{
-    to_detail, BrowsePage, BrowseParams, CategoryChip, ModDetail, RawDetail, RawGameProfile,
-    RawPage, RawRecord, UpdateCheckResult, UpdateInfo,
+    to_detail, BrowsePage, BrowseParams, CategoryChip, ModDetail, NsfwLevel, RawDetail,
+    RawGameProfile, RawPage, RawRecord, UpdateCheckResult, UpdateInfo,
 };
 use crate::api::GAME_ID;
 use crate::error::{AppError, AppResult};
@@ -101,6 +101,46 @@ fn trimmed(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// Mature-content filter. No apiv11 endpoint can filter by visibility, so this
+/// is applied client-side while walking pages, exactly like the character and
+/// category-name filters.
+///
+/// The three modes partition the catalogue: `Sfw` keeps only safe mods, `Nsfw`
+/// only adult ones, and `All` everything. A mod whose payload carried neither
+/// visibility nor ratings ([`NsfwLevel::Unknown`]) appears only under `All`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NsfwMode {
+    All,
+    Sfw,
+    Nsfw,
+}
+
+impl NsfwMode {
+    fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
+            "sfw" | "safe" => NsfwMode::Sfw,
+            "nsfw" | "explicit" => NsfwMode::Nsfw,
+            _ => NsfwMode::All,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            NsfwMode::All => "all",
+            NsfwMode::Sfw => "sfw",
+            NsfwMode::Nsfw => "nsfw",
+        }
+    }
+
+    fn allows(self, level: NsfwLevel) -> bool {
+        match self {
+            NsfwMode::All => true,
+            NsfwMode::Sfw => level == NsfwLevel::Safe,
+            NsfwMode::Nsfw => level == NsfwLevel::Nsfw,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // URLs
 // ---------------------------------------------------------------------------
@@ -146,9 +186,10 @@ pub async fn browse(cache_dir: &Path, params: &BrowseParams) -> AppResult<Browse
     let character = trimmed(params.character.as_deref());
     let category_name = trimmed(params.category_name.as_deref());
     let sort = Sort::parse(params.sort.as_deref());
+    let nsfw = NsfwMode::parse(params.nsfw.as_deref());
 
     let key = format!(
-        "browse|{cursor}|{}|{}|{}|{}|{}",
+        "browse|{cursor}|{}|{}|{}|{}|{}|{}",
         sort.key(),
         search.unwrap_or_default().to_lowercase(),
         params
@@ -156,7 +197,8 @@ pub async fn browse(cache_dir: &Path, params: &BrowseParams) -> AppResult<Browse
             .map(|id| id.to_string())
             .unwrap_or_default(),
         category_name.unwrap_or_default().to_lowercase(),
-        character.unwrap_or_default().to_lowercase()
+        character.unwrap_or_default().to_lowercase(),
+        nsfw.key()
     );
 
     if let Some(mut page) = cache::read::<BrowsePage>(cache_dir, &key, BROWSE_TTL) {
@@ -168,7 +210,9 @@ pub async fn browse(cache_dir: &Path, params: &BrowseParams) -> AppResult<Browse
     // and the sorted subfeed need a client-side category match, which means
     // walking a few extra pages to fill one screen.
     let check_category = sort.uses_subfeed() || search.is_some();
-    let filtering = character.is_some() || (check_category && category_name.is_some());
+    let filtering = character.is_some()
+        || (check_category && category_name.is_some())
+        || nsfw != NsfwMode::All;
     let max_pages = if filtering { LOOKAHEAD_PAGES } else { 1 };
 
     let mut server_page = cursor;
@@ -197,7 +241,7 @@ pub async fn browse(cache_dir: &Path, params: &BrowseParams) -> AppResult<Browse
         }
 
         for record in &raw.records {
-            if matches_filters(record, category_name, character, check_category) {
+            if matches_filters(record, category_name, character, check_category, nsfw) {
                 items.push(crate::api::model::summarize(record));
             }
         }
@@ -231,7 +275,13 @@ fn matches_filters(
     category_name: Option<&str>,
     character: Option<&str>,
     check_category: bool,
+    nsfw: NsfwMode,
 ) -> bool {
+    // Cheapest test first, and it is the one the privacy filter cares about.
+    if !nsfw.allows(record.nsfw_level()) {
+        return false;
+    }
+
     if let Some(character) = character {
         let wanted = character.to_lowercase();
         let sub_category = record
@@ -473,11 +523,56 @@ mod tests {
     fn filters_by_character_and_category() {
         let ellen = record("Character Skins", "Ellen Joe");
 
-        assert!(matches_filters(&ellen, None, Some("ellen"), false));
-        assert!(matches_filters(&ellen, Some("character skins"), None, true));
-        assert!(!matches_filters(&ellen, Some("UI"), None, true));
-        assert!(!matches_filters(&ellen, None, Some("nicole"), false));
-        assert!(matches_filters(&ellen, None, None, false));
+        assert!(matches_filters(&ellen, None, Some("ellen"), false, NsfwMode::All));
+        assert!(matches_filters(&ellen, Some("character skins"), None, true, NsfwMode::All));
+        assert!(!matches_filters(&ellen, Some("UI"), None, true, NsfwMode::All));
+        assert!(!matches_filters(&ellen, None, Some("nicole"), false, NsfwMode::All));
+        assert!(matches_filters(&ellen, None, None, false, NsfwMode::All));
+    }
+
+    #[test]
+    fn parses_nsfw_modes() {
+        assert_eq!(NsfwMode::parse(Some("sfw")), NsfwMode::Sfw);
+        assert_eq!(NsfwMode::parse(Some("NSFW")), NsfwMode::Nsfw);
+        assert_eq!(NsfwMode::parse(None), NsfwMode::All);
+        assert_eq!(NsfwMode::parse(Some("bogus")), NsfwMode::All);
+    }
+
+    #[test]
+    fn nsfw_modes_partition_the_catalogue() {
+        let safe = RawRecord {
+            initial_visibility: Some("show".into()),
+            has_content_ratings: Some(false),
+            ..RawRecord::default()
+        };
+        let adult = RawRecord {
+            initial_visibility: Some("hide".into()),
+            ..RawRecord::default()
+        };
+        let unknown = RawRecord::default();
+
+        // `All` is the only mode that keeps a mod it cannot classify.
+        assert!(matches_filters(&unknown, None, None, false, NsfwMode::All));
+        assert!(!matches_filters(&unknown, None, None, false, NsfwMode::Sfw));
+        assert!(!matches_filters(&unknown, None, None, false, NsfwMode::Nsfw));
+
+        assert!(matches_filters(&safe, None, None, false, NsfwMode::Sfw));
+        assert!(!matches_filters(&safe, None, None, false, NsfwMode::Nsfw));
+
+        assert!(matches_filters(&adult, None, None, false, NsfwMode::Nsfw));
+        assert!(!matches_filters(&adult, None, None, false, NsfwMode::Sfw));
+
+        // The content filter still composes with the character filter.
+        let adult_ellen = RawRecord {
+            initial_visibility: Some("warn".into()),
+            sub_category: Some(RawCategory {
+                name: Some("Ellen Joe".into()),
+            }),
+            ..RawRecord::default()
+        };
+        assert!(matches_filters(&adult_ellen, None, Some("ellen"), false, NsfwMode::Nsfw));
+        assert!(!matches_filters(&adult_ellen, None, Some("ellen"), false, NsfwMode::Sfw));
+        assert!(!matches_filters(&adult_ellen, None, Some("nicole"), false, NsfwMode::Nsfw));
     }
 
     #[test]

@@ -227,6 +227,11 @@ export function ModDetailPage() {
                   {detail.version}
                 </span>
               ) : null}
+              {detail.nsfw === "nsfw" ? (
+                <span className="ml-2 rounded border border-hot-500/40 bg-hot-500/20 px-1.5 py-0.5 font-display text-[9px] uppercase tracking-[0.12em] text-hot-300">
+                  NSFW
+                </span>
+              ) : null}
             </p>
           </div>
 
