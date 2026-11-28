@@ -1,6 +1,14 @@
-import { useEffect, useState } from "react";
-import { ChevronRight, Eye, Heart, ImageOff, TrendingUp } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  Heart,
+  ImageOff,
+  TrendingUp,
+} from "lucide-react";
 
+import { IconButton } from "@/components/ui/IconButton";
 import { formatCount } from "@/lib/format";
 import type { ModSummary } from "@/types/gamebanana";
 
@@ -99,8 +107,59 @@ interface BrowseRailProps {
 
 /** One horizontal shelf of real trending mods, scoped to a category when the
  *  shelf has one; the category word is the only accent so rails can sit
- *  together without competing. */
+ *  together without competing. The native scrollbar is hidden and replaced by
+ *  compact prev/next buttons; the track itself still scrolls by touch, wheel and
+ *  arrow keys. */
 export function BrowseRail({ label, items, onOpen, onSeeAll }: BrowseRailProps) {
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const [edges, setEdges] = useState({ start: true, end: true });
+
+  const heading = label ? `mods in ${label}` : "trending mods";
+
+  const updateEdges = useCallback(() => {
+    const node = scrollerRef.current;
+    if (!node) return;
+
+    const max = node.scrollWidth - node.clientWidth;
+    setEdges({
+      start: node.scrollLeft <= 1,
+      end: max <= 1 || node.scrollLeft >= max - 1,
+    });
+  }, []);
+
+  useEffect(() => {
+    updateEdges();
+
+    const node = scrollerRef.current;
+    if (!node) return;
+
+    node.addEventListener("scroll", updateEdges, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateEdges);
+    observer?.observe(node);
+    window.addEventListener("resize", updateEdges);
+
+    return () => {
+      node.removeEventListener("scroll", updateEdges);
+      observer?.disconnect();
+      window.removeEventListener("resize", updateEdges);
+    };
+  }, [items.length, updateEdges]);
+
+  const scrollByPage = (direction: -1 | 1) => {
+    const node = scrollerRef.current;
+    if (!node) return;
+
+    const amount = Math.max(228, Math.round(node.clientWidth * 0.9));
+    const reducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    node.scrollBy({
+      left: direction * amount,
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+  };
+
   return (
     <section
       className="mt-8"
@@ -119,18 +178,62 @@ export function BrowseRail({ label, items, onOpen, onSeeAll }: BrowseRailProps) 
             </>
           )}
         </h2>
-        {onSeeAll ? (
-          <button
-            type="button"
-            onClick={onSeeAll}
-            className="-my-2 inline-flex h-8 items-center gap-1 px-2 font-mono text-[9px] uppercase tracking-[0.18em] text-zinc-500 transition-colors hover:text-acid-300"
+        <div className="flex items-center gap-2">
+          {onSeeAll ? (
+            <button
+              type="button"
+              onClick={onSeeAll}
+              className="-my-2 inline-flex h-8 items-center gap-1 px-2 font-mono text-[9px] uppercase tracking-[0.18em] text-zinc-500 transition-colors hover:text-acid-300"
+            >
+              See all
+              <ChevronRight className="h-3 w-3" aria-hidden />
+            </button>
+          ) : null}
+          <div
+            role="group"
+            aria-label={`Scroll ${heading}`}
+            className="flex items-center gap-0.5 rounded-lg border border-ink-700 bg-ink-900/70 p-0.5"
           >
-            See all
-            <ChevronRight className="h-3 w-3" aria-hidden />
-          </button>
-        ) : null}
+            <IconButton
+              label={`Previous ${heading}`}
+              onClick={() => scrollByPage(-1)}
+              disabled={edges.start}
+              className="h-6 w-6"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+            </IconButton>
+            <IconButton
+              label={`Next ${heading}`}
+              onClick={() => scrollByPage(1)}
+              disabled={edges.end}
+              className="h-6 w-6"
+            >
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            </IconButton>
+          </div>
+        </div>
       </div>
-      <div className="-mx-1 mt-3 flex snap-x gap-3 overflow-x-auto px-1 pb-2 [scrollbar-width:thin]">
+      <div
+        ref={scrollerRef}
+        tabIndex={0}
+        role="region"
+        aria-label={`${label ? `Trending in ${label}` : "Trending now"} shelf`}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            event.preventDefault();
+            scrollByPage(event.key === "ArrowRight" ? 1 : -1);
+          } else if (event.key === "Home" || event.key === "End") {
+            event.preventDefault();
+            const node = scrollerRef.current;
+            if (!node) return;
+            node.scrollTo({
+              left: event.key === "Home" ? 0 : node.scrollWidth,
+              behavior: "smooth",
+            });
+          }
+        }}
+        className="-mx-1 mt-3 flex snap-x gap-3 overflow-x-auto overscroll-x-contain px-1 pb-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+      >
         {items.map((mod) => (
           <RailCard key={mod.id} mod={mod} onOpen={() => onOpen(mod.id)} />
         ))}

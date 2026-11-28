@@ -145,7 +145,9 @@ export function BrowsePage() {
 
   const modsResult = useModsStore((state) => state.result);
   const updatesResult = useUpdatesStore((state) => state.result);
-  const downloading = useDownloadStore((state) => state.isBusy);
+  const downloading = useDownloadStore(
+    (state) => Object.keys(state.jobs).length,
+  );
   const installingArchive = useInstallerStore((state) => state.isInstalling);
 
   const navigate = useNavigate();
@@ -231,8 +233,8 @@ export function BrowsePage() {
       updates: updatesResult
         ? updatesResult.updates.filter((update) => update.hasUpdate).length
         : null,
-      // One download slot plus one archive batch, whichever is running.
-      queue: downloading || installingArchive ? 1 : 0,
+      // Every GameBanana download plus one archive batch, whichever is running.
+      queue: downloading + (installingArchive ? 1 : 0),
     }),
     [modsResult, updatesResult, downloading, installingArchive],
   );

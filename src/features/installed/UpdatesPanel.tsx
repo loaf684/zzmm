@@ -30,9 +30,7 @@ export function UpdatesPanel({ enabled }: UpdatesPanelProps) {
   const error = useUpdatesStore((state) => state.error);
   const check = useUpdatesStore((state) => state.check);
 
-  const isBusy = useDownloadStore((state) => state.isBusy);
-  const cancelling = useDownloadStore((state) => state.cancelling);
-  const activeModId = useDownloadStore((state) => state.activeModId);
+  const jobs = useDownloadStore((state) => state.jobs);
   const install = useDownloadStore((state) => state.install);
   const cancel = useDownloadStore((state) => state.cancel);
 
@@ -109,7 +107,8 @@ export function UpdatesPanel({ enabled }: UpdatesPanelProps) {
       {updates.length > 0 ? (
         <ul className="space-y-2">
           {updates.map((item) => {
-            const busyHere = isBusy && activeModId === item.modId;
+            const job = jobs[item.modId];
+            const busyHere = Boolean(job);
 
             return (
               <li
@@ -139,7 +138,7 @@ export function UpdatesPanel({ enabled }: UpdatesPanelProps) {
                     size="sm"
                     variant="primary"
                     loading={busyHere}
-                    disabled={isBusy || item.latestFileId === null}
+                    disabled={busyHere || item.latestFileId === null}
                     onClick={() => void updateOne(item)}
                   >
                     <ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />
@@ -149,11 +148,11 @@ export function UpdatesPanel({ enabled }: UpdatesPanelProps) {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => void cancel()}
-                      disabled={cancelling}
+                      onClick={() => void cancel(item.modId)}
+                      disabled={job?.cancelling ?? false}
                     >
                       <X className="h-3.5 w-3.5" aria-hidden />
-                      {cancelling ? "Cancelling…" : "Cancel"}
+{job?.cancelling ? "Cancelling..." : "Cancel"}
                     </Button>
                   ) : null}
                 </div>

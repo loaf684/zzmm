@@ -91,6 +91,7 @@ pub fn run() {
             api::commands::get_gamebanana_mod,
             api::commands::get_gamebanana_categories,
             api::commands::install_gamebanana_mod,
+            api::commands::cancel_gamebanana_install,
             api::commands::check_mod_updates,
             ini_parser::commands::list_mod_ini_files,
             ini_parser::commands::get_mod_hotkeys,

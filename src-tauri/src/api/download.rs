@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,9 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 /// `replace_folder` is the folder of the version being updated: after a
 /// successful install it is disabled (not deleted) so the user can roll back and
 /// nothing is silently destroyed.
+///
+/// Downloads are independent per call; `install_lock` is only taken for the
+/// extract/move phase, which is the part that shares the Mods directory.
 pub async fn install_mod(
     app: &AppHandle,
     config_dir: &Path,
@@ -33,6 +36,7 @@ pub async fn install_mod(
     file_id: Option<u64>,
     replace_folder: Option<String>,
     cancel: Arc<AtomicBool>,
+    install_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> AppResult<DownloadOutcome> {
     if !mods_dir.is_dir() {
         return Err(AppError::NoModsDir);
@@ -55,7 +59,9 @@ pub async fn install_mod(
         ))
     })?;
 
-    let archive_path = unique_path(&downloads_dir, &file_name);
+    // Reserve the archive path atomically: concurrent downloads may pick the
+    // same friendly name, and only one of them may own that file.
+    let (archive_path, archive) = create_archive(&downloads_dir, &file_name)?;
 
     emit(
         app,
@@ -67,10 +73,29 @@ pub async fn install_mod(
         format!("Downloading {}", file.name),
     );
 
-    if let Err(error) = download_file(app, &detail, &file, &archive_path, cancel.as_ref()).await {
+    if let Err(error) = download_file(app, &detail, &file, archive, cancel.as_ref()).await {
         remove_archive(&archive_path);
         return Err(error);
     }
+
+    // Extracting and moving folders must not overlap another install (local or
+    // GameBanana): both decide destinations and per-character enable state from
+    // the same Mods folder. The download above stayed parallel.
+    let install_guard = match install_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            emit(
+                app,
+                &detail,
+                "installing",
+                95,
+                0,
+                0,
+                "Waiting for another install to finish...".to_string(),
+            );
+            install_lock.lock().await
+        }
+    };
 
     let installed = install_download(
         app,
@@ -83,11 +108,40 @@ pub async fn install_mod(
     )
     .await;
 
+    drop(install_guard);
+
     // The archive is only needed for the install; keep the disk tidy on success,
     // failure, and cancellation.
     remove_archive(&archive_path);
 
     installed
+}
+
+/// Map GameBanana's root category to the app's grouping label.
+///
+/// `Character Skins` keeps the leaf category (the character); `UI` and
+/// `Bangboo Skins` are the two non-character targets and use their root names
+/// exactly as the Browse category filter displays them. Any other root returns
+/// `None` so the scanner's own name-based guess decides.
+fn category_character(super_category: Option<&str>, leaf: Option<&str>) -> Option<String> {
+    let root = super_category?.trim();
+
+    if root.eq_ignore_ascii_case("ui") {
+        return Some("UI".to_string());
+    }
+
+    if root.to_ascii_lowercase().contains("bangboo") {
+        return Some("Bangboo Skins".to_string());
+    }
+
+    if root.eq_ignore_ascii_case("character skins") {
+        return leaf
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+
+    None
 }
 
 fn remove_archive(path: &Path) {
@@ -191,11 +245,37 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{stem}-{}.{extension}", std::process::id()))
 }
 
+/// Reserve a fresh archive path and file handle. `create_new` closes the race
+/// that a plain `exists()` check leaves between two parallel downloads.
+fn create_archive(dir: &Path, name: &str) -> AppResult<(PathBuf, File)> {
+    for _ in 0..64 {
+        let candidate = unique_path(dir, name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(AppError::Download(format!(
+                    "Could not create the download file ({}): {error}",
+                    candidate.display()
+                )))
+            }
+        }
+    }
+
+    Err(AppError::Download(
+        "Could not reserve a download file name. Try again.".to_string(),
+    ))
+}
+
 async fn download_file(
     app: &AppHandle,
     detail: &ModDetail,
     file: &ModFile,
-    target: &Path,
+    mut handle: File,
     cancel: &AtomicBool,
 ) -> AppResult<()> {
     if cancel.load(Ordering::SeqCst) {
@@ -215,9 +295,6 @@ async fn download_file(
 
     let total = response.content_length().unwrap_or(0);
     let mut response = response;
-    let mut handle = File::create(target).map_err(|error| {
-        AppError::Download(format!("Could not create the download file: {error}"))
-    })?;
 
     let mut received: u64 = 0;
     let mut last_emit = Instant::now();
@@ -294,12 +371,20 @@ async fn install_download(
         "Extracting and installing…".to_string(),
     );
 
+    // GameBanana's root category is the safest automatic classification: UI
+    // and Bangboo submissions have no character of their own, while a character
+    // skin's leaf category is the roster name. Unknown roots stay `None` so the
+    // scanner's name-based guess is not overridden by an invented category.
+    let character =
+        category_character(detail.super_category.as_deref(), detail.category.as_deref())
+            .or_else(|| detail.sub_category.clone());
+
     let metadata = metadata::ModMetadata {
         source: Some("gamebanana".to_string()),
         game_banana_mod_id: Some(detail.id),
         game_banana_file_id: Some(file.id),
         name: Some(detail.name.clone()),
-        character: detail.sub_category.clone(),
+        character: character.clone(),
         version: file.version.clone().or_else(|| detail.version.clone()),
         author: detail.author.clone(),
         installed_at: Some(iso_utc_now()),
@@ -315,6 +400,7 @@ async fn install_download(
     let file_id = file.id;
     let file_name = file.name.clone();
     let detail_for_progress = detail.clone();
+    let character_hint = character.clone();
 
     let outcome = tauri::async_runtime::spawn_blocking(move || -> AppResult<DownloadOutcome> {
         if cancel.load(Ordering::SeqCst) {
@@ -339,7 +425,7 @@ async fn install_download(
             &mods_dir_owned,
             &archive_owned,
             &detail_for_progress.name,
-            detail_for_progress.sub_category.as_deref(),
+            character_hint.as_deref(),
             cancel.as_ref(),
             &mut emit_install,
         );
@@ -360,8 +446,11 @@ async fn install_download(
         }
 
         // Disable the previous version so two copies are never loaded at once.
-        let replaced =
-            disable_replaced(&mods_dir_owned, &result.installed, replace_folder.as_deref());
+        let replaced = disable_replaced(
+            &mods_dir_owned,
+            &result.installed,
+            replace_folder.as_deref(),
+        );
 
         Ok(DownloadOutcome {
             mod_id,
@@ -524,6 +613,43 @@ mod tests {
         assert!(!mods_dir.join("My Skin").exists());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn classifies_gamebanana_root_categories() {
+        assert_eq!(
+            category_character(Some("UI"), Some("Character UI")).as_deref(),
+            Some("UI")
+        );
+        assert_eq!(
+            category_character(Some("Bangboo Skins"), Some("Eous")).as_deref(),
+            Some("Bangboo Skins")
+        );
+        assert_eq!(
+            category_character(Some("Character Skins"), Some("Ellen Joe")).as_deref(),
+            Some("Ellen Joe")
+        );
+        // An unfamiliar root or a character skin without a leaf name stays
+        // unknown instead of inventing a category.
+        assert_eq!(category_character(Some("Other/Misc"), Some("Tools")), None);
+        assert_eq!(category_character(None, Some("Ellen Joe")), None);
+        assert_eq!(category_character(Some("Character Skins"), None), None);
+    }
+
+    #[test]
+    fn reserves_distinct_archives_for_parallel_downloads() {
+        let dir =
+            std::env::temp_dir().join(format!("zzmm-parallel-download-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        let (first, _first_file) = create_archive(&dir, "mod.zip").expect("first");
+        let (second, _second_file) = create_archive(&dir, "mod.zip").expect("second");
+
+        assert_ne!(first, second);
+        assert!(first.is_file());
+        assert!(second.is_file());
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

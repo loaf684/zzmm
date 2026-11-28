@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, ChevronRight, Eye, Heart, ImageOff } from "lucide-react";
+import { ChevronRight, Eye, Heart, ImageOff } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import { formatCount, formatDate } from "@/lib/format";
@@ -169,12 +169,6 @@ export function BrowseCard({ mod, view = "grid", onOpen }: BrowseCardProps) {
               {formatCount(mod.views)}
             </span>
           </div>
-          <span
-            aria-hidden
-            className="inline-flex h-6 w-6 shrink-0 translate-y-1 items-center justify-center rounded-md border border-acid-400/40 bg-acid-400/10 text-acid-300 opacity-0 transition-all duration-200 ease-smooth group-hover:translate-y-0 group-hover:opacity-100 group-focus-visible:translate-y-0 group-focus-visible:opacity-100"
-          >
-            <ArrowRight className="h-3 w-3" />
-          </span>
         </div>
       </div>
 

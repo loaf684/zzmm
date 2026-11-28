@@ -121,6 +121,8 @@ See [docs/TECHNICAL.md](docs/TECHNICAL.md) for commands, data layout, and API no
 
 - Windows only; encrypted ZIP/RAR archives and some 7z codecs are unsupported.
 - Character grouping is heuristic; ambiguous names land in **Uncategorized**.
+  UI and Bangboo-targeted mods group under GameBanana's **UI** and **Bangboo
+  Skins** categories instead.
 - The 3D preview shows the bind pose (no skinning, morphs, or normal maps); textures are capped at 1024 px and the base mip only.
 - Hotkey conflicts compare keys, not `condition` expressions.
 - GameBanana descriptions render as plain text, and the API exposes no download-count sort.
