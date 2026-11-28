@@ -235,6 +235,9 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
   nested folders below a root stay part of that mod. This supports both a single
   mod wrapped in folders and packs containing several mods.
 - Multiple mods in one archive are installed as separate folders.
+- Installed folders get the ZZMI `DISABLED_` prefix, so a fresh install — dropped
+  archive or GameBanana download — stays off until you enable it from the
+  Installed page.
 - Folder names are sanitized for Windows (invalid characters, reserved names,
   leading dots) and collisions get a ` (2)`, ` (3)` suffix instead of
   overwriting an existing mod.
@@ -260,7 +263,8 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - **Update checks** on the Installed page compare the stored file ID (or version
   when the ID is missing) against the newest GameBanana file. Updating installs
   the new file as a new folder and **disables** the old one instead of deleting
-  it, so nothing is lost.
+  it, so nothing is lost; the new folder lands disabled too, so nothing loads
+  until the user enables it.
 
 #### API details and constraints
 

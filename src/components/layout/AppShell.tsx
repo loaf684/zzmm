@@ -30,7 +30,6 @@ import { useInstallerStore } from "@/store/installer";
 import { useModsStore } from "@/store/mods";
 import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toasts";
-import { CharacterPrompt } from "./CharacterPrompt";
 
 interface NavItem {
   to: string;
@@ -74,14 +73,11 @@ export function AppShell() {
   const installProgress = useInstallerStore((state) => state.progress);
   const installedCount = useModsStore((state) => state.result?.mods.length ?? null);
   const mods = useModsStore((state) => state.result?.mods);
-  const assignCharacter = useModsStore((state) => state.assignCharacter);
 
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [dragActive, setDragActive] = useState(false);
-  const [assignFolders, setAssignFolders] = useState<string[] | null>(null);
-  const [assigning, setAssigning] = useState(false);
 
   const configured = Boolean(view?.settings.modsDir);
   const valid = view?.modsDirState.valid ?? false;
@@ -192,10 +188,9 @@ export function AppShell() {
 
           void install(archives).then((folders) => {
             if (folders.length > 0) {
+              // The installer leaves new folders disabled; the Installed page
+              // is where the user reviews and enables them.
               navigate("/installed");
-              // Naming the character now makes the sidebar filter and the
-              // one-active-per-character rule useful immediately.
-              setAssignFolders(folders);
             }
           });
         }
@@ -459,23 +454,6 @@ export function AppShell() {
       </main>
 
       <ToastViewport />
-
-      {assignFolders ? (
-        <CharacterPrompt
-          folders={assignFolders}
-          suggestions={characters
-            .map((entry) => entry.character)
-            .filter((character) => character !== "Uncategorized")}
-          busy={assigning}
-          onSkip={() => setAssignFolders(null)}
-          onAssign={async (character) => {
-            setAssigning(true);
-            const saved = await assignCharacter(assignFolders, character);
-            setAssigning(false);
-            if (saved) setAssignFolders(null);
-          }}
-        />
-      ) : null}
 
       {dragActive ? (
         <div className="pointer-events-none fixed inset-0 z-[55] flex items-center justify-center bg-ink-950/80 p-8 backdrop-blur-sm">

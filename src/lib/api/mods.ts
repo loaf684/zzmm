@@ -1,7 +1,6 @@
 import { call } from "@/lib/api/client";
 import type {
   ApplyModStatesResult,
-  CharacterAssignResult,
   LoadoutApplyResult,
   LoadoutSummary,
   ModDetails,
@@ -57,17 +56,6 @@ export const modsApi = {
     character: string | null,
   ): Promise<ModScanResult> {
     return call<ModScanResult>("set_mod_character", { folderName, character });
-  },
-
-  /** Tag several freshly installed folders in one backend pass. */
-  assignCharacter(
-    folderNames: string[],
-    character: string | null,
-  ): Promise<CharacterAssignResult> {
-    return call<CharacterAssignResult>("assign_mods_character", {
-      folderNames,
-      character,
-    });
   },
 
   listLoadouts(): Promise<LoadoutSummary[]> {

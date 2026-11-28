@@ -94,14 +94,6 @@ pub struct ApplyModStatesResult {
     pub backup_file: Option<String>,
 }
 
-/// Result of tagging several freshly installed folders with one character.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CharacterAssignResult {
-    pub scan: ModScanResult,
-    pub failed: Vec<ModStateFailure>,
-}
-
 /// Extra per-mod data loaded only when the detail panel opens: local preview
 /// images, the total folder size, and the fallback install date.
 #[derive(Debug, Clone, Serialize)]

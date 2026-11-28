@@ -7,14 +7,17 @@ use crate::error::{AppError, AppResult};
 use crate::installer::extract;
 use crate::installer::model::{ArchiveInstallOutcome, InstallProgress};
 use crate::installer::root;
+use crate::mods::scanner::DISABLED_PREFIX;
 
 const RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// Install every mod found in one archive. Failures are reported in the outcome
-/// instead of aborting a multi-archive drop.
+/// Install every mod found in one archive. Every installed folder gets the
+/// ZZMI `DISABLED_` prefix so a fresh archive is off until the user enables it.
+/// Failures are reported in the outcome instead of aborting a multi-archive
+/// drop.
 pub fn install_archive(
     mods_dir: &Path,
     archive_path: &Path,
@@ -79,7 +82,8 @@ pub fn install_archive(
 /// Install one downloaded mod as a single folder, even when the archive splits
 /// its INIs across sibling folders (`body/`, `face/`, `hair/`). GameBanana
 /// files are one mod, so flattening every INI root into the Mods folder would
-/// show the same download as several installed entries.
+/// show the same download as several installed entries. Like the drag-and-drop
+/// installer, the folder lands disabled until the user enables it.
 pub fn install_archive_single(
     mods_dir: &Path,
     archive_path: &Path,
@@ -433,18 +437,27 @@ fn sanitize_folder_name(raw: &str) -> String {
     limited
 }
 
+/// Unique destination for an installed mod. Every install lands disabled, so the
+/// name carries the ZZMI `DISABLED_` prefix used by the enable/disable toggle.
+///
+/// A name is skipped while its plain twin is on disk too: a folder and its
+/// `DISABLED_` counterpart cannot be renamed into each other, so installing
+/// `DISABLED_Mod` beside an existing `Mod` would leave that mod impossible to
+/// disable later (the toggle would find the target name taken). This is what
+/// keeps the GameBanana update path able to disable the replaced version.
 fn unique_destination(mods_dir: &Path, preferred: &str) -> PathBuf {
     let base = sanitize_folder_name(preferred);
-    let candidate = mods_dir.join(&base);
+    let disabled = |name: &str| format!("{DISABLED_PREFIX}{name}");
+    let free = |name: &str| !mods_dir.join(name).exists();
 
-    if !candidate.exists() {
-        return candidate;
+    if free(&disabled(&base)) && free(&base) {
+        return mods_dir.join(disabled(&base));
     }
 
     for index in 2..=999u32 {
-        let candidate = mods_dir.join(format!("{base} ({index})"));
-        if !candidate.exists() {
-            return candidate;
+        let suffixed = format!("{base} ({index})");
+        if free(&disabled(&suffixed)) && free(&suffixed) {
+            return mods_dir.join(disabled(&suffixed));
         }
     }
 
@@ -453,7 +466,7 @@ fn unique_destination(mods_dir: &Path, preferred: &str) -> PathBuf {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
-    mods_dir.join(format!("{base} ({fallback})"))
+    mods_dir.join(disabled(&format!("{base} ({fallback})")))
 }
 
 /// Put every detected root under one mod folder, keeping each root's name.
@@ -545,11 +558,26 @@ mod tests {
         assert_eq!(sanitize_folder_name("  ..  "), "Installed Mod");
 
         let mods_dir = temp_dir("zzmm-name-test");
-        fs::create_dir_all(mods_dir.join("ModA")).expect("existing mod");
 
+        // Fresh installs land disabled, so the destination already carries the prefix.
         assert_eq!(
             unique_destination(&mods_dir, "ModA"),
-            mods_dir.join("ModA (2)")
+            mods_dir.join("DISABLED_ModA")
+        );
+
+        // A pre-existing disabled twin forces a suffix instead of landing enabled.
+        fs::create_dir_all(mods_dir.join("DISABLED_ModA")).expect("existing disabled mod");
+        assert_eq!(
+            unique_destination(&mods_dir, "ModA"),
+            mods_dir.join("DISABLED_ModA (2)")
+        );
+
+        // An enabled twin is skipped too: taking its disabled name would make it
+        // impossible to disable later (the rename target would be taken).
+        fs::create_dir_all(mods_dir.join("ModB")).expect("existing enabled mod");
+        assert_eq!(
+            unique_destination(&mods_dir, "ModB"),
+            mods_dir.join("DISABLED_ModB (2)")
         );
 
         fs::remove_dir_all(&mods_dir).ok();
@@ -584,10 +612,12 @@ mod tests {
         );
 
         assert_eq!(outcome.error, None);
-        assert_eq!(outcome.installed, vec!["Seed Thicc".to_string()]);
-        assert!(mods_dir.join("Seed Thicc/body/body.ini").is_file());
-        assert!(mods_dir.join("Seed Thicc/face/face.ini").is_file());
-        assert!(mods_dir.join("Seed Thicc/hair/hair.ini").is_file());
+        // A GameBanana download lands disabled, like a dropped archive.
+        assert_eq!(outcome.installed, vec!["DISABLED_Seed Thicc".to_string()]);
+        assert!(mods_dir.join("DISABLED_Seed Thicc/body/body.ini").is_file());
+        assert!(mods_dir.join("DISABLED_Seed Thicc/face/face.ini").is_file());
+        assert!(mods_dir.join("DISABLED_Seed Thicc/hair/hair.ini").is_file());
+        assert!(!mods_dir.join("Seed Thicc").exists());
         assert!(!mods_dir.join("body").exists());
         assert!(!mods_dir.join("face").exists());
         assert!(!mods_dir.join("hair").exists());
@@ -723,8 +753,11 @@ mod tests {
 
         assert_eq!(first.error, None);
         assert_eq!(first.installed.len(), 2);
-        assert!(mods_dir.join("ModA/mod.ini").is_file());
-        assert!(mods_dir.join("ModB/mod.ini").is_file());
+        assert!(mods_dir.join("DISABLED_ModA/mod.ini").is_file());
+        assert!(mods_dir.join("DISABLED_ModB/mod.ini").is_file());
+        // A fresh archive stays disabled until the user enables it.
+        assert!(!mods_dir.join("ModA").exists());
+        assert!(!mods_dir.join("ModB").exists());
         assert!(stages.iter().any(|stage| stage == "done"));
 
         let second = install_archive(
@@ -734,8 +767,8 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(second.error, None);
-        assert!(second.installed.contains(&"ModA (2)".to_string()));
-        assert!(second.installed.contains(&"ModB (2)".to_string()));
+        assert!(second.installed.contains(&"DISABLED_ModA (2)".to_string()));
+        assert!(second.installed.contains(&"DISABLED_ModB (2)".to_string()));
 
         // Staging is always cleaned up.
         let staging_leftovers = fs::read_dir(&mods_dir)
@@ -783,8 +816,8 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(outcome.error, None);
-        assert_eq!(outcome.installed, vec!["My Ellen Skin".to_string()]);
-        assert!(mods_dir.join("My Ellen Skin/mod.ini").is_file());
+        assert_eq!(outcome.installed, vec!["DISABLED_My Ellen Skin".to_string()]);
+        assert!(mods_dir.join("DISABLED_My Ellen Skin/mod.ini").is_file());
 
         fs::remove_dir_all(&root).ok();
     }

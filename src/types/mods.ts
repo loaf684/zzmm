@@ -98,11 +98,6 @@ export interface ModStateFailure {
   message: string;
 }
 
-export interface CharacterAssignResult {
-  scan: ModScanResult;
-  failed: ModStateFailure[];
-}
-
 export interface ApplyModStatesResult {
   scan: ModScanResult;
   changed: string[];

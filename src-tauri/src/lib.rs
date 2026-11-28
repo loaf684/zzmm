@@ -74,7 +74,6 @@ pub fn run() {
             mods::commands::set_mod_enabled,
             mods::commands::apply_mod_states,
             mods::commands::set_mod_character,
-            mods::commands::assign_mods_character,
             mods::commands::delete_mod,
             mods::commands::open_mod_folder,
             mods::commands::get_mod_details,
