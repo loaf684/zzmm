@@ -12,12 +12,6 @@ pub struct Settings {
     /// Absolute path to the ZZMI `Mods` folder. `None` until the user links one.
     #[serde(default)]
     pub mods_dir: Option<String>,
-
-    /// When true, enabling a mod automatically disables every other enabled mod
-    /// that belongs to the same character. Mods without a character are never
-    /// touched.
-    #[serde(default)]
-    pub one_active_per_character: bool,
 }
 
 fn default_schema_version() -> u32 {
@@ -29,7 +23,6 @@ impl Default for Settings {
         Self {
             schema_version: SCHEMA_VERSION,
             mods_dir: None,
-            one_active_per_character: false,
         }
     }
 }

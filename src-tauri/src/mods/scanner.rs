@@ -138,14 +138,7 @@ fn read_mod_folders(mods_dir: &Path) -> AppResult<Vec<(String, String, bool)>> {
 
 fn inspect_mod(path: &Path, folder_name: &str, base_name: &str, enabled: bool) -> ScannedMod {
     let metadata = metadata::read(path);
-
-    let display_name = metadata
-        .as_ref()
-        .and_then(|meta| meta.name.as_deref())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(base_name)
-        .to_string();
+    let display_name = display_name(&metadata, base_name);
 
     let thumbnail_path = find_thumbnail(path);
     // Only GameBanana-backed mods are "linked": `.zzmm.json` may also exist
@@ -184,6 +177,53 @@ fn inspect_mod(path: &Path, folder_name: &str, base_name: &str, enabled: bool) -
         },
         hash_refs,
     }
+}
+
+/// The name shown for a mod: the sidecar's, or the folder-derived base name.
+fn display_name(metadata: &Option<metadata::ModMetadata>, base_name: &str) -> String {
+    metadata
+        .as_ref()
+        .and_then(|meta| meta.name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(base_name)
+        .to_string()
+}
+
+/// The confident character of a mod folder that is already on disk, or `None`
+/// when it cannot be pinned to a known ZZZ character. Used by the installer so
+/// a second mod for the same character lands disabled. Only INI *names* are
+/// read here, never their bodies, so classifying an existing library stays
+/// cheap.
+pub fn installed_character(mod_dir: &Path, base_name: &str) -> Option<&'static str> {
+    let metadata = metadata::read(mod_dir);
+    let display_name = display_name(&metadata, base_name);
+    let hints = collect_name_hints(mod_dir, mod_dir, 0);
+
+    characters::confident_character(metadata.as_ref(), base_name, &display_name, &hints)
+}
+
+/// The confident character of mod roots that are about to be installed under
+/// `base_name`. `hint` is a character the download source already knows
+/// (GameBanana's character subcategory) before any `.zzmm.json` has been
+/// written.
+pub fn staged_character(
+    base_name: &str,
+    roots: &[PathBuf],
+    hint: Option<&str>,
+) -> Option<&'static str> {
+    let metadata = roots.iter().find_map(|root| metadata::read(root));
+    let display_name = display_name(&metadata, base_name);
+
+    let mut hints = Vec::new();
+    for root in roots {
+        hints.extend(collect_name_hints(root, root, 0));
+    }
+    if let Some(hint) = hint {
+        hints.push(hint.to_string());
+    }
+
+    characters::confident_character(metadata.as_ref(), base_name, &display_name, &hints)
 }
 
 /// Only look at the mod root: nested images are usually textures, not previews.
@@ -282,11 +322,7 @@ fn collect_ini_info(dir: &Path, root: &Path, depth: usize) -> (Vec<ScannedHash>,
         if !file_type.is_file() {
             continue;
         }
-        if !path
-            .extension()
-            .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("ini"))
-            .unwrap_or(false)
-        {
+        if !is_ini_file(&path) {
             continue;
         }
 
@@ -322,23 +358,7 @@ fn collect_ini_info(dir: &Path, root: &Path, depth: usize) -> (Vec<ScannedHash>,
         // but name the INI after the character (`Dialyn.ini`), or put the name
         // on a sub-folder. Without these the roster matcher only ever saw the
         // folder itself and fell back to "Uncategorized".
-        if let Some(stem) = path.file_stem() {
-            let stem = stem.to_string_lossy();
-            if !stem.trim().is_empty() {
-                name_hints.push(stem.to_string());
-            }
-        }
-
-        if let Some(parent) = path.parent() {
-            if parent != root {
-                if let Some(folder) = parent.file_name() {
-                    let folder = folder.to_string_lossy();
-                    if !folder.trim().is_empty() {
-                        name_hints.push(folder.to_string());
-                    }
-                }
-            }
-        }
+        name_hints.extend(ini_name_hints(&path, root));
 
         parse_ini_hashes(&text, &relative, &mut hashes);
 
@@ -354,6 +374,79 @@ fn collect_ini_info(dir: &Path, root: &Path, depth: usize) -> (Vec<ScannedHash>,
     }
 
     (hashes, hotkey_count, name_hints)
+}
+
+/// True for a `.ini` file, whatever the case of its extension.
+fn is_ini_file(path: &Path) -> bool {
+    path.extension()
+        .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("ini"))
+        .unwrap_or(false)
+}
+
+/// Character hints one INI contributes: its own name, and — for a nested INI —
+/// the folder holding it.
+fn ini_name_hints(path: &Path, root: &Path) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if let Some(stem) = path.file_stem() {
+        let stem = stem.to_string_lossy();
+        if !stem.trim().is_empty() {
+            hints.push(stem.to_string());
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent != root {
+            if let Some(folder) = parent.file_name() {
+                let folder = folder.to_string_lossy();
+                if !folder.trim().is_empty() {
+                    hints.push(folder.to_string());
+                }
+            }
+        }
+    }
+
+    hints
+}
+
+/// Collect only the character hints (INI names and their folders) from a mod
+/// tree, without opening a single INI. Mirrors the INI walk in
+/// [`collect_ini_info`], which gathers the same hints while it reads each body.
+fn collect_name_hints(dir: &Path, root: &Path, depth: usize) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if depth > MAX_INI_DEPTH {
+        return hints;
+    }
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return hints;
+    };
+
+    let mut entries: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let Ok(file_type) = fs::symlink_metadata(&path).map(|metadata| metadata.file_type()) else {
+            continue;
+        };
+
+        if file_type.is_dir() {
+            hints.extend(collect_name_hints(&path, root, depth + 1));
+            continue;
+        }
+        if !file_type.is_file() || !is_ini_file(&path) {
+            continue;
+        }
+
+        hints.extend(ini_name_hints(&path, root));
+    }
+
+    hints
 }
 
 fn decode_ini(bytes: &[u8]) -> String {

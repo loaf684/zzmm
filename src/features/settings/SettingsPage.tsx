@@ -9,7 +9,6 @@ import { toUserMessage } from "@/lib/errors";
 import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toasts";
 import type { DetectedModsDir, ModsDirState } from "@/types/settings";
-import { BehaviorSection } from "./BehaviorSection";
 import { DetectedInstallations } from "./DetectedInstallations";
 import { ModsFolderSection } from "./ModsFolderSection";
 import { StorageSection } from "./StorageSection";
@@ -116,7 +115,7 @@ export function SettingsPage() {
     }
 
     const saved = await save({
-      ...(view?.settings ?? { schemaVersion: 1, oneActivePerCharacter: false }),
+      ...(view?.settings ?? { schemaVersion: 1, modsDir: null }),
       modsDir: value,
     });
     if (saved) {
@@ -169,8 +168,6 @@ export function SettingsPage() {
             onDetect={() => void runDetection()}
             onUse={setDraft}
           />
-
-          <BehaviorSection settings={view.settings} />
 
           <StorageSection paths={view.paths} />
         </div>
