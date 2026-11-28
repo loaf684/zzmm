@@ -116,6 +116,7 @@ Both paths are shown in **Settings → Storage & logs**.
 | -------- | ---------------------------------------------------------- |
 | Settings | `%APPDATA%\app.zzmm.desktop\settings.json`                  |
 | Loadouts | `%APPDATA%\app.zzmm.desktop\loadouts.json`                  |
+| Fixer ignore list + fix history | `%APPDATA%\app.zzmm.desktop\fixer.json`     |
 | State backups | `%APPDATA%\app.zzmm.desktop\backups\mod-state-*.json`  |
 | Logs     | `%LOCALAPPDATA%\app.zzmm.desktop\logs\zzmm.log`             |
 | API cache| `%APPDATA%\app.zzmm.desktop\cache\gamebanana\*.json`        |
@@ -439,13 +440,17 @@ text. The engine itself is independent Rust (`src-tauri/src/fixer/`).
 
 | Command           | Inputs                              | Result |
 | ----------------- | ----------------------------------- | ------ |
-| `fixer_scan`      | `modsDir`                           | `{ scanned, skipped, files: [{ folder, iniPath, character, characters, updated: [{from,to,label}], additions: [{section,hash,label}], unsupported: [{command,hash,label,reason}], needsBufferPass, error? }] }` |
-| `fixer_apply`     | `modsDir`, `iniPaths[]`, `backup`   | `{ applied: [{iniPath, backupPath, updated, additions, unsupported, needsBufferPass}], failed: [{iniPath,error}], needsBufferPass: [{iniPath, commands}], unchanged: [iniPath] }` |
+| `fixer_scan`      | `modsDir`                           | `{ scanned, skipped, files: [{ folder, iniPath, character, characters, updated: [{from,to,label,key,ignored}], additions: [{section,hash,label,key,ignored}], unsupported: [{command,hash,label,reason}], needsBufferPass, ignored, ignoredScope?, error? }] }` |
+| `fixer_apply`     | `modsDir`, `iniPaths[]`, `backup`   | `{ applied: [{iniPath, folder, character, fixedAt, backupPath, updated, additions, unsupported, needsBufferPass}], failed: [{iniPath,error}], needsBufferPass: [{iniPath, commands}], unchanged: [iniPath], ignored: [iniPath] }` |
 | `fixer_rollback`  | `modsDir`, `iniPaths[]`             | `{ restored: [iniPath], failed: [{iniPath,error}] }` |
+| `fixer_state`     | -                                   | `{ ignored: [{folder, iniPath, key, label, ignoredAt}], history: [{iniPath, folder, character, backupPath?, backupAvailable, fixedAt, updated, additions, restoredAt?}] }` |
+| `fixer_ignore`    | `folder`, `iniPath?`, `key?`, `label`, `ignored` | The new `fixer_state` view |
+| `fixer_restore`   | `modsDir`, `iniPath`, `fixedAt`     | `{ restored: [iniPath], failed: [{iniPath,error}] }` |
 
 - `fixer_scan` is read-only: no file, folder or backup is created.
 - `apply`/`rollback` refuse paths outside `modsDir` (canonicalised, so `..` and
-  symlinks cannot escape).
+  symlinks cannot escape). `restore` reads the backup path from the stored
+  history, never from the caller.
 - `files` lists only INIs that need something: updates, additions, unsupported
   commands, or an `error` when the file could not be processed (such a file is
   never written).
@@ -478,6 +483,62 @@ Python tool cannot move the original); because the backup name carries only the
 basename, two same-named INIs in one mod cannot be told apart on rollback
 (upstream has the same limit). `.buf` backups (`(.buf) Backup`) are not written,
 because no `.buf` file is rewritten.
+
+### Ignoring a fix
+
+Some mods simply do not work with a hash rewrite (the tool they were built for
+disagrees with the fix, or the author's own patch is in the file). The Mod Fixer
+therefore keeps a **persistent ignore list**, at three scopes, most specific
+first:
+
+| Scope | How it is stored | What it does |
+| ----- | ---------------- | ------------ |
+| One recommendation | `iniPath` + `key` (`hash:<from>><to>`, `section:<hash>:<section>`) | That one hash rewrite or section insert is skipped |
+| One ini | `iniPath` only | Every fix in that file is skipped |
+| One mod | `folder` only | Every fix in every ini under that folder is skipped |
+
+- Storage: `fixer.json` in the app config folder (`fixer::store`), written with
+  the project's temp-file + rename; a file that cannot be parsed is moved aside
+  instead of being overwritten. Ignoring **never touches a mod's ini** - only
+  this file changes.
+- `fixer_scan` still lists ignored files and recommendations, marked
+  `ignored`/`ignoredScope`, so the user can see and undo them; they are simply
+  not selected for fixing.
+- `fixer_apply` enforces the list itself: a file-scoped ignore is checked before
+  the file is even read, and an ignored recommendation is skipped inside the
+  engine (`engine::run_with_ignore`), so the UI cannot bypass it.
+- Fixes are bundled per stale hash in the database: a hash's entry usually holds
+  `update_hash` plus the section insert and IB check that only make sense once
+  the file carries the newer hash. Ignoring the rewrite therefore skips that
+  whole bundle, and all of its rows are reported as ignored. Ignoring only a
+  section insert leaves the hash rewrite (and the IB check for the same hash)
+  working.
+- Scan and apply run the *same* filtered engine, so a report never promises a
+  write that an apply with the same list will not make (no INI is mutated in
+  either direction while ignoring).
+
+### Restore history
+
+`fixer_apply` appends one record per written file to `fixer.json`
+(`iniPath`, folder, character, counts, unix seconds, and the backup path
+`backup::stash` just wrote, if any). `fixer_state` returns them newest first,
+with `backupAvailable` computed by checking the file on disk *at that moment* -
+so the UI can never offer a restore whose backup is gone (deleted by hand, or
+consumed by an earlier rollback).
+
+`fixer_restore(modsDir, iniPath, fixedAt)` looks the record up in the stored
+history - the backup path is never taken from the caller - validates that the
+ini is inside the Mods folder, and hands the exact backup to
+`backup::restore_from`, i.e. the same write + delete `fixer_rollback` uses
+picking the newest backup. Restoring therefore undoes *that* fix even when the
+file was fixed again later, and the entry is marked `restoredAt` so the history
+stays honest. `(iniPath, fixedAt)` is kept unique by bumping the timestamp when
+two fixes of one file land in the same second, the same trick `backup::stash`
+uses for backup names. The newest 200 records are kept; their backups on disk are
+left alone.
+
+The Mod Fixer page shows the ignore list and the history panels on mount, so
+both survive leaving the route and coming back (and an app restart).
 
 ### Deviations from upstream
 
@@ -518,7 +579,7 @@ src-tauri/src/
   mods/               scanner, metadata, characters, actions, asset scope, commands
   installer/          archive detection/extraction, root detection, install, commands
   ini_parser/         lossless INI parser, encodings, bindings, conflicts, commands
-  fixer/              ZZZ-Mod-Fixer port: hash database, rewrite engine, backups, commands
+  fixer/              ZZZ-Mod-Fixer port: hash database, rewrite engine, backups, ignore list, history, commands
   mesh_loader/        resource scanning, buffer decoding, preview command
   texture/            DDS header parsing, BCn decoding, PNG previews
   api/                GameBanana client, TTL cache, browse/detail/updates, download, commands
@@ -564,7 +625,10 @@ IPC commands:
 | `load_mod_preview`   | Buffers + textures for one mod; accepts toggle overrides |
 | `fixer_scan`         | Read-only: which mods carry outdated hashes            |
 | `fixer_apply`        | Rewrite chosen INIs, moving originals to a backup      |
-| `fixer_rollback`     | Restore chosen INIs from their backups                 |
+| `fixer_rollback`     | Restore chosen INIs from their newest backups          |
+| `fixer_state`        | The persistent ignore list and fix history             |
+| `fixer_ignore`       | Ignore/unignore a mod, an INI or one recommendation    |
+| `fixer_restore`      | Restore one recorded fix from its exact backup         |
 
 ## Thumbnail access (asset protocol)
 
