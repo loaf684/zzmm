@@ -28,21 +28,21 @@ ZZMM keeps a Zenless Zone Zero mod library organized: it scans your Mods folder,
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/screenshot-library.png" alt="ZZMM mod library grouped by character" width="100%" />
+      <img src="docs/screenshot-fixer.png" alt="ZZMM Mod Fixer scanning the Mods folder and listing the mods that need repair" width="100%" />
       <br />
-      <strong>Installed: library grouped by character</strong>
+      <strong>Fixer: scan the Mods folder and repair mods broken by a game update</strong>
     </td>
     <td align="center" width="50%">
-      <img src="docs/screenshot-browse.png" alt="Browsing and installing GameBanana mods in ZZMM" width="100%" />
+      <img src="docs/screenshot-installed.png" alt="ZZMM Installed page filtered to Anby, showing two enabled mod cards" width="100%" />
       <br />
-      <strong>Browse: GameBanana search, filters and inline install</strong>
+      <strong>Installed: mod library grouped by character</strong>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/screenshot-detail.png" alt="ZZMM mod detail page with a 3D preview and hotkey list" width="100%" />
+      <img src="docs/screenshot-browse-detail.png" alt="GameBanana mod page inside ZZMM with a one-click install button" width="100%" />
       <br />
-      <strong>Mod detail: 3D preview, hotkeys and notes</strong>
+      <strong>Browse: GameBanana mod page with one-click install</strong>
     </td>
   </tr>
 </table>
