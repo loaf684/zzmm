@@ -261,6 +261,10 @@ pub struct RawDetail {
     pub submitter: Option<RawSubmitter>,
     #[serde(rename = "_aCategory", default)]
     pub category: Option<RawCategory>,
+    /// Root category ("Character Skins", "UI", "Bangboo Skins", ...). The
+    /// profile endpoint names it here instead of `_aRootCategory`.
+    #[serde(rename = "_aSuperCategory", default)]
+    pub super_category: Option<RawCategory>,
     #[serde(rename = "_aRootCategory", default)]
     pub root_category: Option<RawCategory>,
     #[serde(rename = "_aSubCategory", default)]
@@ -369,6 +373,9 @@ pub struct ModDetail {
     pub description: String,
     pub category: Option<String>,
     pub sub_category: Option<String>,
+    /// GameBanana's root category, e.g. "Character Skins", "UI" or
+    /// "Bangboo Skins". Used to classify non-character downloads.
+    pub super_category: Option<String>,
     pub version: Option<String>,
     pub likes: u32,
     pub views: u32,
@@ -531,6 +538,7 @@ pub fn to_detail(raw: RawDetail) -> ModDetail {
             .and_then(RawCategory::label)
             .or_else(|| raw.root_category.as_ref().and_then(RawCategory::label)),
         sub_category: raw.sub_category.as_ref().and_then(RawCategory::label),
+        super_category: raw.super_category.as_ref().and_then(RawCategory::label),
         version: non_empty(raw.version.clone()),
         likes: raw.like_count.unwrap_or(0),
         views: raw.view_count.unwrap_or(0),

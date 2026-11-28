@@ -36,4 +36,9 @@ export const gamebananaApi = {
   checkUpdates(): Promise<UpdateCheckResult> {
     return call<UpdateCheckResult>("check_mod_updates");
   },
+
+  /** Stop one GameBanana download; other running downloads keep going. */
+  cancelInstall(modId: number): Promise<boolean> {
+    return call<boolean>("cancel_gamebanana_install", { modId });
+  },
 };

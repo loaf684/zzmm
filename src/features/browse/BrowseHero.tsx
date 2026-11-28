@@ -19,7 +19,7 @@ export interface BrowseStats {
   installed: number | null;
   /** `null` until updates have been checked this session. */
   updates: number | null;
-  /** Single-slot installer: 1 while an install is running, else 0. */
+  /** GameBanana downloads in flight plus the local archive batch (0 or 1). */
   queue: number;
 }
 

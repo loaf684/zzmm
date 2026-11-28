@@ -109,6 +109,12 @@ const TOKEN_SUFFIXES: &[&str] = &[
     "xxmi", "3dmigoto",
 ];
 
+/// GameBanana's own root-category names for the two non-character targets.
+/// Reusing them keeps Installed grouping and the Browse category filter using
+/// one vocabulary.
+pub const UI_CATEGORY: &str = "UI";
+pub const BANGBOO_CATEGORY: &str = "Bangboo Skins";
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn guess(metadata: Option<&ModMetadata>, base_name: &str) -> String {
     guess_with_context(metadata, base_name, base_name, &[])
@@ -133,13 +139,59 @@ pub fn guess_with_context(
     // Roster matching runs before the bracket prefix because tags such as
     // `[NSFW] Ellen Joe` or `[4K] Zhu Yuan` would otherwise be mistaken for a
     // character name and hide the real one.
-    if let Some((character, _)) = best_roster_match(base_name, display_name, hints) {
+    let roster = best_roster_match(base_name, display_name, hints);
+
+    // UI and Bangboo mods are not character skins. Only the folder and display
+    // name are safe hints: character skins routinely ship a `ui.ini`, so INI
+    // names would misclassify them.
+    if let Some(category) = category_target(base_name, display_name, roster.is_some()) {
+        return category.to_string();
+    }
+
+    if let Some((character, _)) = roster {
         return character.to_string();
     }
 
     from_bracket_prefix(base_name)
         .or_else(|| from_bracket_prefix(display_name))
         .unwrap_or_else(|| "Uncategorized".to_string())
+}
+
+/// Recognize the two non-character targets GameBanana exposes as root
+/// categories. A UI token wins even beside a character name (`UI Reskin
+/// Phoenix` is a UI mod, not a Phoenix skin). A Bangboo token beside a confident
+/// roster name is ambiguous — a skin can simply feature a Bangboo — so the
+/// character is kept there.
+fn category_target(
+    base_name: &str,
+    display_name: &str,
+    has_character: bool,
+) -> Option<&'static str> {
+    let mut ui = false;
+    let mut bangboo = false;
+
+    for name in [base_name, display_name] {
+        for token in tokenize(name) {
+            if token_matches_alias(&token, "ui")
+                || token_matches_alias(&token, "hud")
+                || token == "interface"
+            {
+                ui = true;
+            } else if token == "bangboos" || token_matches_alias(&token, "bangboo") {
+                bangboo = true;
+            }
+        }
+    }
+
+    if ui {
+        return Some(UI_CATEGORY);
+    }
+
+    if bangboo && !has_character {
+        return Some(BANGBOO_CATEGORY);
+    }
+
+    None
 }
 
 /// The character the app is *sure* about, for deciding whether a freshly
@@ -159,6 +211,9 @@ pub fn confident_character(
 ) -> Option<&'static str> {
     if let Some(name) = metadata.and_then(|meta| meta.character.as_deref()) {
         let name = name.trim();
+        if is_non_character_category(name) {
+            return None;
+        }
         if !name.is_empty() && !is_generic(name) {
             if let Some((character, _)) = roster_match(name) {
                 return Some(character);
@@ -166,7 +221,21 @@ pub fn confident_character(
         }
     }
 
-    best_roster_match(base_name, display_name, hints).map(|(character, _)| character)
+    let roster = best_roster_match(base_name, display_name, hints);
+
+    // A UI or Bangboo mod is not a character skin even when its title names one
+    // (`UI Reskin Phoenix`). Collision detection must not disable it.
+    if category_target(base_name, display_name, roster.is_some()).is_some() {
+        return None;
+    }
+
+    roster.map(|(character, _)| character)
+}
+
+/// The two automatic category labels are targets, not roster characters, so
+/// they must never participate in per-character collision decisions.
+fn is_non_character_category(name: &str) -> bool {
+    name.eq_ignore_ascii_case(UI_CATEGORY) || name.eq_ignore_ascii_case(BANGBOO_CATEGORY)
 }
 
 /// Longest roster alias found across the folder name, the display name and the
@@ -445,6 +514,43 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_ui_and_bangboo_targets() {
+        // UI wins beside a character name: the mod edits the interface, not
+        // the character it depicts.
+        assert_eq!(guess(None, "UI Reskin Phoenix"), "UI");
+        assert_eq!(guess(None, "Animated NSFW Nicole Ui"), "UI");
+        assert_eq!(guess(None, "HUD Overhaul"), "UI");
+        assert_eq!(guess(None, "[UI] Clean Menus"), "UI");
+        assert_eq!(guess(None, "Bangboo Reskin"), "Bangboo Skins");
+        assert_eq!(guess(None, "ZZZ-Bangboo-tomori"), "Bangboo Skins");
+        assert_eq!(
+            guess_with_context(None, "Outfit 01", "Bangboo Edition", &[]),
+            "Bangboo Skins"
+        );
+    }
+
+    #[test]
+    fn explicit_categories_and_ambiguous_names_are_not_overridden() {
+        let metadata = ModMetadata {
+            character: Some("Bangboo Skins".into()),
+            ..ModMetadata::default()
+        };
+        assert_eq!(guess(Some(&metadata), "UI Pack"), "Bangboo Skins");
+
+        // A character plus a Bangboo reference is ambiguous; keep the character.
+        assert_eq!(guess(None, "Ellen Bangboo Hoodie"), "Ellen Joe");
+    }
+
+    #[test]
+    fn ui_ini_names_do_not_override_a_character() {
+        // Many character skins ship a `ui.ini` for their menu icon.
+        assert_eq!(
+            guess_with_context(None, "EllenMod", "EllenMod", &["ui.ini".to_string()]),
+            "Ellen Joe"
+        );
+    }
+
+    #[test]
     fn confident_character_requires_a_known_roster_name() {
         assert_eq!(
             confident_character(None, "EllenMod_merge", "EllenMod_merge", &[]),
@@ -453,6 +559,23 @@ mod tests {
         assert_eq!(
             confident_character(None, "Outfit 01", "Outfit 01", &["Dialyn.ini".to_string()]),
             Some("Dialyn")
+        );
+        // A UI mod titles a character but is not that character's skin.
+        assert_eq!(
+            confident_character(None, "UI Reskin Phoenix", "UI Reskin Phoenix", &[]),
+            None
+        );
+        assert_eq!(
+            confident_character(None, "Bangboo Reskin", "Bangboo Reskin", &[]),
+            None
+        );
+        let ui = ModMetadata {
+            character: Some("UI".into()),
+            ..ModMetadata::default()
+        };
+        assert_eq!(
+            confident_character(Some(&ui), "Phoenix", "Phoenix", &[]),
+            None
         );
         // A `[Tag]` prefix that is not a known character is ambiguous, so it must
         // not look like a collision.

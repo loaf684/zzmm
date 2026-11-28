@@ -32,6 +32,11 @@ pub async fn install_archives(
     let mods_dir = current_mods_dir(&state)?;
     state.install_cancel.store(false, Ordering::SeqCst);
     let cancel = state.install_cancel.clone();
+    let install_lock = state.install_lock.clone();
+
+    // Folder extraction and moves touch the shared Mods directory, so a local
+    // batch takes the same lock as a GameBanana download's install phase.
+    let _install_guard = install_lock.lock().await;
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut outcomes = Vec::with_capacity(paths.len());

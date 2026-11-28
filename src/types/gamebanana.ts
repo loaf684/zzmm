@@ -81,6 +81,8 @@ export interface ModDetail {
   description: string;
   category: string | null;
   subCategory: string | null;
+  /** GameBanana's root category ("Character Skins", "UI", "Bangboo Skins"). */
+  superCategory: string | null;
   version: string | null;
   likes: number;
   views: number;

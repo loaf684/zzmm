@@ -175,8 +175,15 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - Enable/disable, delete (with confirmation), and open-in-Explorer per mod, plus
   a button to open the Mods folder itself.
 - Groups mods by character: `.zzmm.json` first, then a best-effort ZZZ roster,
-  then a meaningful `[Character]` folder prefix, otherwise **Uncategorized**. The
-  character can be overridden from the detail panel.
+  then a meaningful `[Character]` folder prefix, otherwise **Uncategorized**. UI
+  and Bangboo mods are recognized as the non-character targets they are —
+  **UI** and **Bangboo Skins**, GameBanana's own root-category names — using the
+  game's root category when it is known and otherwise only safe folder/display
+  name hints (never INI names, since character skins routinely ship a `ui.ini`).
+  A UI token beats a character name (`UI Reskin Phoenix` is a UI mod); a Bangboo
+  token beside a confident character name is ambiguous and keeps the character.
+  The character can be overridden from the detail panel, and an explicit label
+  is never replaced by automatic detection.
 - The sidebar owns the primary library filters: search (`q`), enabled state
   (`state=all|enabled|disabled`) and character (`character`). The page mirrors
   them as URL params, so the sidebar, the compact toolbar and deep links stay in
@@ -261,6 +268,10 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - Search, category filter (GameBanana root categories), character filter,
   content filter and sorting, with infinite scroll and a manual *Load more*
   fallback.
+- **Trending shelves** scroll horizontally with the native scrollbar hidden:
+  compact previous/next buttons (disabled at each end, labelled per shelf) step
+  one screenful, and the track also scrolls by touch, wheel and Arrow/Home/End
+  keys while focused.
 - **Content filter** (`All` / `SFW` / `NSFW`) reads GameBanana's mature-content
   metadata: `_sInitialVisibility` (`show` / `warn` / `hide`), corroborated by
   `_bHasContentRatings` on the list endpoints and `_aContentRatings` on the
@@ -274,7 +285,19 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - **Install** downloads the chosen file into the app data `downloads` folder
   (with a byte-accurate progress bar), then hands it to the same archive
   installer used for drag-and-drop. Each installed folder gets a `.zzmm.json`
-  with the mod ID, file ID, version, install date and thumbnail URL.
+  with the mod ID, file ID, version, root-category-derived grouping label,
+  install date and thumbnail URL.
+- **Concurrent downloads**: a GameBanana download no longer blocks another mod's
+  download button. Each download owns its own cancel flag and progress, so
+  cancelling one leaves the others running, duplicate clicks on the same mod are
+  refused (the mod ID is reserved for the duration), and the *In queue* hero
+  stat counts every download in flight. Downloads stream in parallel; the
+  extract-and-move phase is serialized behind one lock because destination
+  naming and per-character enable decisions read the shared Mods folder. A
+  download that reaches that phase while another install runs reports
+  "Waiting for another install to finish..." instead of racing it. Archive paths
+  are reserved with `create_new`, so two downloads that pick the same friendly
+  file name cannot share one file.
 - **Update checks** on the Installed page compare the stored file ID (or version
   when the ID is missing) against the newest GameBanana file. Updating installs
   the new file as a new folder and **disables** the old one instead of deleting
@@ -725,7 +748,9 @@ The sidebar uses the shipped app icon (`src-tauri/icons/icon.png`, copied to
 ## Known limitations / notes
 
 - Character grouping for unlinked mods is heuristic; ambiguous names fall into
-  **Uncategorized**.
+  **Uncategorized**. UI and Bangboo targets are recognized from the folder and
+  display name only, so a local mod whose title never says "UI" or "Bangboo" has
+  to be categorized from the detail panel.
 - Delete is permanent (no Recycle Bin integration) and is confirmed in the UI.
 - Installing a mod with an existing name creates a suffixed copy rather than
   replacing files in place. Updates install a new folder and disable the old

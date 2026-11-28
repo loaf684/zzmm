@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
@@ -50,6 +51,12 @@ pub async fn get_gamebanana_categories(state: State<'_, AppState>) -> AppResult<
 }
 
 /// Download and install one file from GameBanana.
+///
+/// Downloads run independently: each mod owns its cancel flag, so a second mod
+/// can start while `activeModId`-style UI state belongs to the first. Installing
+/// is serialized through `install_lock` because extraction and destination
+/// naming touch one shared Mods folder. The mod ID is reserved while it runs,
+/// which is what stops a duplicate click from starting the same download twice.
 #[tauri::command]
 pub async fn install_gamebanana_mod(
     app: AppHandle,
@@ -60,10 +67,25 @@ pub async fn install_gamebanana_mod(
 ) -> AppResult<DownloadOutcome> {
     let mods = mods_dir(&state)?;
     let config = state.paths.config_dir.clone();
-    state.install_cancel.store(false, Ordering::SeqCst);
-    let cancel = state.install_cancel.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
 
-    download::install_mod(
+    {
+        let mut active = state
+            .gamebanana_cancels
+            .lock()
+            .map_err(|_| AppError::StateLock)?;
+
+        if active.contains_key(&mod_id) {
+            return Err(AppError::Download(
+                "That mod is already downloading. Wait for it to finish before starting it again."
+                    .to_string(),
+            ));
+        }
+
+        active.insert(mod_id, cancel.clone());
+    }
+
+    let result = download::install_mod(
         &app,
         &config,
         &mods,
@@ -71,8 +93,31 @@ pub async fn install_gamebanana_mod(
         file_id,
         replace_folder,
         cancel,
+        state.install_lock.clone(),
     )
-    .await
+    .await;
+
+    if let Ok(mut active) = state.gamebanana_cancels.lock() {
+        active.remove(&mod_id);
+    }
+
+    result
+}
+
+/// Ask one GameBanana download to stop. Other running downloads are untouched.
+#[tauri::command]
+pub fn cancel_gamebanana_install(state: State<'_, AppState>, mod_id: u64) -> bool {
+    let Ok(active) = state.gamebanana_cancels.lock() else {
+        return false;
+    };
+
+    match active.get(&mod_id) {
+        Some(cancel) => {
+            cancel.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Compare installed `.zzmm.json` file IDs with the latest GameBanana files.

@@ -31,12 +31,9 @@ export function ModDetailPage() {
   const detailError = useBrowseStore((state) => state.detailError);
   const loadDetail = useBrowseStore((state) => state.loadDetail);
 
-  const isBusy = useDownloadStore((state) => state.isBusy);
-  const activeModId = useDownloadStore((state) => state.activeModId);
-  const progress = useDownloadStore((state) => state.progress);
+  const job = useDownloadStore((state) => state.jobs[id]);
   const install = useDownloadStore((state) => state.install);
   const cancel = useDownloadStore((state) => state.cancel);
-  const cancelling = useDownloadStore((state) => state.cancelling);
   const openUrl = useModsStore((state) => state.openUrl);
 
   const navigate = useNavigate();
@@ -63,7 +60,9 @@ export function ModDetailPage() {
     setActiveImage(0);
   }, [detail]);
 
-  const busyHere = isBusy && activeModId === id;
+  const busyHere = Boolean(job);
+  const progress = job?.progress ?? null;
+  const cancelling = job?.cancelling ?? false;
   const selectedFile = detail?.files.find((file) => file.id === selectedFileId) ?? null;
 
   const goBack = () => navigate("/browse");
@@ -303,9 +302,9 @@ export function ModDetailPage() {
                   variant="primary"
                   className="mt-1 w-full"
                   loading={busyHere}
-                  disabled={!selectedFile || isBusy}
+                  disabled={!selectedFile || busyHere}
                   onClick={() => {
-                    if (!selectedFile) return;
+                    if (!selectedFile || busyHere) return;
                     void install({
                       modId: detail.id,
                       name: detail.name,
@@ -343,7 +342,7 @@ export function ModDetailPage() {
                         size="sm"
                         variant="ghost"
                         className="h-6 shrink-0 px-2 text-[10px]"
-                        onClick={() => void cancel()}
+                        onClick={() => void cancel(detail.id)}
                         disabled={cancelling}
                       >
                         <X className="h-3 w-3" aria-hidden />
