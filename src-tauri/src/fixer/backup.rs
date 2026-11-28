@@ -193,7 +193,7 @@ pub fn newest_backup(ini: &Path) -> Option<PathBuf> {
 pub fn restore(ini: &Path) -> AppResult<PathBuf> {
     let backup = newest_backup(ini).ok_or_else(|| {
         AppError::IniNotFound(format!(
-            "no {}…{} backup found for {}",
+            "no {}...{} backup found for {}",
             BACKUP_PREFIX,
             basename(
                 &ini
@@ -205,11 +205,26 @@ pub fn restore(ini: &Path) -> AppResult<PathBuf> {
         ))
     })?;
 
-    let bytes = fs::read(&backup)?;
-    write_atomic(ini, &bytes)?;
-    fs::remove_file(&backup)?;
+    restore_from(ini, &backup)
+}
 
-    Ok(backup)
+/// Put one specific backup back over the INI and consume it. `restore` picks
+/// the newest backup by name; the fixer history restores the exact backup a
+/// recorded fix wrote, which is the only way to undo an older fix of a file
+/// that was fixed twice.
+pub fn restore_from(ini: &Path, backup: &Path) -> AppResult<PathBuf> {
+    if !backup.is_file() {
+        return Err(AppError::IniNotFound(format!(
+            "the backup {} is no longer on disk",
+            backup.display()
+        )));
+    }
+
+    let bytes = fs::read(backup)?;
+    write_atomic(ini, &bytes)?;
+    fs::remove_file(backup)?;
+
+    Ok(backup.to_path_buf())
 }
 
 /// Unix seconds, the unit upstream stamps backups with.
@@ -362,6 +377,32 @@ mod tests {
         fs::write(&newer, b"newer\n").expect("newer");
 
         assert_eq!(newest_backup(&ini), Some(newer));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The fixer history restores the backup a *specific* fix wrote, so an
+    /// older fix of the same file can still be undone after a newer one.
+    #[test]
+    fn restore_from_puts_back_the_named_backup_even_when_a_newer_one_exists() {
+        let root = scratch("exact");
+        let mods = root.join("Mods").join("EllenMod");
+        fs::create_dir_all(&mods).expect("mods");
+        let ini = mods.join("Ellen.ini");
+        fs::write(&ini, b"fixed twice\n").expect("seed");
+
+        let first = mods.join(backup_name("Ellen.ini", 100));
+        let second = mods.join(backup_name("Ellen.ini", 200));
+        fs::write(&first, b"pristine\n").expect("first");
+        fs::write(&second, b"after the first fix\n").expect("second");
+
+        let restored_from = restore_from(&ini, &first).expect("restore");
+        assert_eq!(restored_from, first);
+        assert_eq!(fs::read(&ini).expect("read"), b"pristine\n");
+        assert!(!first.exists(), "only the named backup is consumed");
+        assert!(second.exists(), "the newer backup is left alone");
+
+        assert!(restore_from(&ini, &first).is_err(), "a consumed backup cannot restore again");
 
         fs::remove_dir_all(&root).ok();
     }

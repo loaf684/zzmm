@@ -116,6 +116,7 @@ Both paths are shown in **Settings → Storage & logs**.
 | -------- | ---------------------------------------------------------- |
 | Settings | `%APPDATA%\app.zzmm.desktop\settings.json`                  |
 | Loadouts | `%APPDATA%\app.zzmm.desktop\loadouts.json`                  |
+| Fixer ignore list + fix history | `%APPDATA%\app.zzmm.desktop\fixer.json`     |
 | State backups | `%APPDATA%\app.zzmm.desktop\backups\mod-state-*.json`  |
 | Logs     | `%LOCALAPPDATA%\app.zzmm.desktop\logs\zzmm.log`             |
 | API cache| `%APPDATA%\app.zzmm.desktop\cache\gamebanana\*.json`        |
@@ -439,13 +440,17 @@ text. The engine itself is independent Rust (`src-tauri/src/fixer/`).
 
 | Command           | Inputs                              | Result |
 | ----------------- | ----------------------------------- | ------ |
-| `fixer_scan`      | `modsDir`                           | `{ scanned, skipped, files: [{ folder, iniPath, character, characters, updated: [{from,to,label}], additions: [{section,hash,label}], unsupported: [{command,hash,label,reason}], needsBufferPass, error? }] }` |
-| `fixer_apply`     | `modsDir`, `iniPaths[]`, `backup`   | `{ applied: [{iniPath, backupPath, updated, additions, unsupported, needsBufferPass}], failed: [{iniPath,error}], needsBufferPass: [{iniPath, commands}], unchanged: [iniPath] }` |
+| `fixer_scan`      | `modsDir`                           | `{ scanned, skipped, files: [{ folder, iniPath, character, characters, updated: [{from,to,label,key,ignored}], additions: [{section,hash,label,key,ignored}], unsupported: [{command,hash,label,reason}], needsBufferPass, ignored, ignoredScope?, error? }] }` |
+| `fixer_apply`     | `modsDir`, `iniPaths[]`, `backup`   | `{ applied: [{iniPath, folder, character, fixedAt, backupPath, updated, additions, unsupported, needsBufferPass}], failed: [{iniPath,error}], needsBufferPass: [{iniPath, commands}], unchanged: [iniPath], ignored: [iniPath] }` |
 | `fixer_rollback`  | `modsDir`, `iniPaths[]`             | `{ restored: [iniPath], failed: [{iniPath,error}] }` |
+| `fixer_state`     | -                                   | `{ ignored: [{folder, iniPath, key, label, ignoredAt}], history: [{iniPath, folder, character, backupPath?, backupAvailable, fixedAt, updated, additions, restoredAt?}] }` |
+| `fixer_ignore`    | `folder`, `iniPath?`, `key?`, `label`, `ignored` | The new `fixer_state` view |
+| `fixer_restore`   | `modsDir`, `iniPath`, `fixedAt`     | `{ restored: [iniPath], failed: [{iniPath,error}] }` |
 
 - `fixer_scan` is read-only: no file, folder or backup is created.
 - `apply`/`rollback` refuse paths outside `modsDir` (canonicalised, so `..` and
-  symlinks cannot escape).
+  symlinks cannot escape). `restore` reads the backup path from the stored
+  history, never from the caller.
 - `files` lists only INIs that need something: updates, additions, unsupported
   commands, or an `error` when the file could not be processed (such a file is
   never written).

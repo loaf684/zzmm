@@ -12,7 +12,7 @@
 //! buffer-level commands being *detected* rather than applied. Every deviation
 //! is listed in `docs/TECHNICAL.md`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::fixer::database::{is_buffer_command, Database, Entry, RawCommand};
 use crate::fixer::model::{HashUpdate, SectionAddition, UnsupportedCommand};
@@ -102,9 +102,39 @@ pub struct RunOutcome {
     pub text: String,
 }
 
+/// Stable identity of an `update_hash` recommendation. Both hashes are
+/// lowercased so the ignore list matches whatever case the INI used.
+pub fn hash_key(from: &str, to: &str) -> String {
+    format!(
+        "hash:{}>{}",
+        from.to_ascii_lowercase(),
+        to.to_ascii_lowercase()
+    )
+}
+
+/// Stable identity of an added-section recommendation.
+pub fn section_key(hash: &str, section: &str) -> String {
+    format!(
+        "section:{}:{}",
+        hash.to_ascii_lowercase(),
+        section.to_ascii_lowercase()
+    )
+}
+
 /// Scan one INI file's text and apply the fixes for the hashes it contains.
 /// Pure: nothing is written, and the input is left alone.
 pub fn run(text: &str, db: &Database) -> RunOutcome {
+    run_with_ignore(text, db, &HashSet::new())
+}
+
+/// As [`run`], minus the recommendations in `ignored` (the keys
+/// [`hash_key`]/[`section_key`] produce for this file).
+///
+/// An ignored rewrite is still reported - the UI keeps showing what the fixer
+/// would do - but is never performed, and the fixes that keyed off the hash it
+/// would have written are not attempted either. Scan and apply share this
+/// function, so a report always says exactly what a later apply writes.
+pub fn run_with_ignore(text: &str, db: &Database, ignored: &HashSet<String>) -> RunOutcome {
     let lines = split_lines(text);
     let newline = dominant_newline(&lines);
 
@@ -114,6 +144,7 @@ pub fn run(text: &str, db: &Database) -> RunOutcome {
         newline,
         present: Default::default(),
         report: RunReport::default(),
+        ignored,
     };
     runner.finish();
     let outcome = RunOutcome {
@@ -201,6 +232,9 @@ struct Runner<'a> {
     newline: String,
     present: std::collections::HashSet<String>,
     report: RunReport,
+    /// Recommendation keys the user ignored for this file, from
+    /// [`crate::fixer::store::IgnoreSet::keys_for`].
+    ignored: &'a HashSet<String>,
 }
 
 impl<'a> Runner<'a> {
@@ -469,6 +503,10 @@ impl<'a> Runner<'a> {
 
     /// `update_hash`: point the current hash's lines at a newer one, keeping the
     /// old value behind as a comment.
+    ///
+    /// An ignored update is reported and skipped *whole*: nothing is rewritten
+    /// and the new hash is not queued, so fixes somebody else keys off it are
+    /// not attempted against a file that does not contain it.
     fn update_hash(&mut self, command: &RawCommand, ctx: &mut Ctx) {
         let Some(new_hash) = command.args.get("new_hash").and_then(|v| v.as_str()) else {
             ctx.error = Some(format!("update_hash: {REASON_MALFORMED}"));
@@ -494,34 +532,49 @@ impl<'a> Runner<'a> {
             })
             .collect();
 
-        for index in matches.iter().rev() {
-            let Some(parsed) = parse_hash_line(&self.lines[*index].text) else {
-                continue;
-            };
-
-            let original = std::mem::take(&mut self.lines[*index].text);
-            let ending = self.lines[*index].ending.clone();
-            let key_start = parsed.key_start;
-
-            // `{indent}hash = <new>` on the original line, the old spelling on
-            // the line below it - both with the file's own line ending.
-            self.lines[*index].text = format!("{}hash = {new_hash}", &original[..key_start]);
-            self.lines[*index].ending = self.newline.clone();
-            self.lines.insert(
-                *index + 1,
-                IniLine {
-                    text: format!("; {}", &original[key_start..]),
-                    ending,
-                },
-            );
-        }
+        let key = hash_key(&old, new_hash);
 
         if !matches.is_empty() {
+            if self.ignored.contains(&key) {
+                self.report.updated.push(HashUpdate {
+                    from: old,
+                    to: new_hash.to_string(),
+                    label: ctx.label.clone(),
+                    key,
+                    ignored: true,
+                });
+                return;
+            }
+
+            for index in matches.iter().rev() {
+                let Some(parsed) = parse_hash_line(&self.lines[*index].text) else {
+                    continue;
+                };
+
+                let original = std::mem::take(&mut self.lines[*index].text);
+                let ending = self.lines[*index].ending.clone();
+                let key_start = parsed.key_start;
+
+                // `{indent}hash = <new>` on the original line, the old spelling on
+                // the line below it - both with the file's own line ending.
+                self.lines[*index].text = format!("{}hash = {new_hash}", &original[..key_start]);
+                self.lines[*index].ending = self.newline.clone();
+                self.lines.insert(
+                    *index + 1,
+                    IniLine {
+                        text: format!("; {}", &original[key_start..]),
+                        ending,
+                    },
+                );
+            }
+
             self.report.touched = true;
             self.report.updated.push(HashUpdate {
                 from: old,
                 to: new_hash.to_string(),
                 label: ctx.label.clone(),
+                key,
+                ignored: false,
             });
         }
 
@@ -573,10 +626,26 @@ impl<'a> Runner<'a> {
     }
 
     fn schedule_addition(&mut self, equivalent: &str, title: &str, section: String, ctx: &mut Ctx) {
+        let section_name = format!("[TextureOverride{title}]");
+        let key = section_key(equivalent, &section_name);
+
+        if self.ignored.contains(&key) {
+            self.report.additions.push(SectionAddition {
+                section: section_name,
+                hash: equivalent.to_string(),
+                label: ctx.label.clone(),
+                key,
+                ignored: true,
+            });
+            return;
+        }
+
         self.report.additions.push(SectionAddition {
-            section: format!("[TextureOverride{title}]"),
+            section: section_name,
             hash: equivalent.to_string(),
             label: ctx.label.clone(),
+            key,
+            ignored: false,
         });
 
         self.present.insert(equivalent.to_ascii_lowercase());
@@ -848,12 +917,14 @@ mod tests {
     }
 
     fn scan_hashes_of(text: &str) -> Vec<String> {
+        let ignored = HashSet::new();
         Runner {
             db: Database::bundled(),
             lines: split_lines(text),
             newline: "\r\n".to_string(),
             present: Default::default(),
             report: RunReport::default(),
+            ignored: &ignored,
         }
         .scan_hashes()
     }
@@ -960,6 +1031,57 @@ mod tests {
 
         assert_eq!(outcome.report.characters, vec!["Soldier11".to_string()]);
         assert_eq!(outcome.report.character(), "Soldier11");
+    }
+
+    /// The two shapes an ignored recommendation takes, and the guarantee that
+    /// matters: scan and apply run the same filtered engine, so a report never
+    /// promises a rewrite that an apply with the same ignore list will not do.
+    #[test]
+    fn ignored_recommendations_are_reported_but_never_applied() {
+        let update = "[TextureOverrideX]\r\nhash = 3c8697e8\r\n";
+        let update_key = hash_key("3C8697E8", "67821D9D");
+
+        let ignored: HashSet<String> = [update_key.clone()].into();
+        let outcome = run_with_ignore(update, Database::bundled(), &ignored);
+
+        assert_eq!(outcome.text, update, "an ignored update writes nothing");
+        assert!(!outcome.report.touched);
+        assert_eq!(outcome.report.updated.len(), 1);
+        assert!(outcome.report.updated[0].ignored);
+        assert_eq!(outcome.report.updated[0].to, "67821d9d");
+        assert_eq!(outcome.report.updated[0].key, update_key, "keys are lowercased");
+        assert!(
+            outcome.report.additions.is_empty(),
+            "fixes keyed off the skipped hash are not attempted either: {:?}",
+            outcome.report.additions
+        );
+
+        // The same file without the ignore still rewrites as before.
+        let plain = run(update, Database::bundled());
+        assert!(plain.report.touched);
+        assert!(!plain.report.updated[0].ignored);
+        assert_eq!(plain.report.updated[0].key, update_key);
+    }
+
+    #[test]
+    fn an_ignored_section_addition_leaves_the_hash_fix_alone() {
+        let text = "[TextureOverrideSoldier11Head]\r\nhash = 3c8697e8\r\nmatch_priority = 0\r\n\r\n[TextureOverrideOther]\r\nhash = ffffffff\r\nib = data.buf\r\n";
+
+        let plain = run(text, Database::bundled());
+        let addition = plain.report.additions.first().expect("a section is added").clone();
+        assert!(!addition.ignored);
+        assert!(addition.key.starts_with("section:"), "key: {}", addition.key);
+
+        let ignored: HashSet<String> = [addition.key.clone()].into();
+        let outcome = run_with_ignore(text, Database::bundled(), &ignored);
+
+        assert!(outcome.report.touched, "the hash update still applies");
+        assert!(outcome.text.contains("hash = 67821d9d"));
+        assert!(!outcome.text.contains(&addition.section));
+        assert!(outcome.report.updated.iter().all(|change| !change.ignored));
+        assert_eq!(outcome.report.additions.len(), 1);
+        assert!(outcome.report.additions[0].ignored);
+        assert_eq!(outcome.report.error, None);
     }
 }
 

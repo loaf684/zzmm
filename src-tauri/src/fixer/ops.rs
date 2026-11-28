@@ -4,6 +4,7 @@
 //! Everything here is plain functions over paths so it can be unit tested; the
 //! Tauri command wrappers live in `commands.rs`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +14,9 @@ use crate::fixer::database::Database;
 use crate::fixer::engine;
 use crate::fixer::model::{
     FixerApplied, FixerApplyResult, FixerBufferPending, FixerFailure, FixerFileReport,
-    FixerRollbackResult, FixerScanResult,
+    FixerHistoryRecord, FixerRollbackResult, FixerScanResult, IGNORE_SCOPE_FIX,
 };
+use crate::fixer::store::IgnoreSet;
 use crate::ini_parser::text::{self, Encoding};
 
 /// Refuse to load absurd files rather than exhaust memory on a stray dump.
@@ -87,7 +89,7 @@ fn parser_encoding(encoding: FileEncoding) -> Option<Encoding> {
 // MARK: scan
 
 /// Read-only scan. Never writes anything, not even a backup.
-pub fn scan(mods_dir: &Path) -> AppResult<FixerScanResult> {
+pub fn scan(mods_dir: &Path, ignored: &IgnoreSet) -> AppResult<FixerScanResult> {
     if !mods_dir.is_dir() {
         return Err(AppError::ModsDirMissing(mods_dir.display().to_string()));
     }
@@ -96,6 +98,7 @@ pub fn scan(mods_dir: &Path) -> AppResult<FixerScanResult> {
     // prefix on every `iniPath` the UI shows.
     let mut state = Walk {
         root: mods_dir.to_path_buf(),
+        ignored,
         scanned: 0,
         skipped: 0,
         files: Vec::new(),
@@ -109,8 +112,9 @@ pub fn scan(mods_dir: &Path) -> AppResult<FixerScanResult> {
     })
 }
 
-struct Walk {
+struct Walk<'a> {
     root: PathBuf,
+    ignored: &'a IgnoreSet,
     scanned: u32,
     skipped: u32,
     files: Vec<FixerFileReport>,
@@ -154,7 +158,7 @@ impl Walk {
                         continue;
                     }
                     self.scanned += 1;
-                    if let Some(report) = inspect(&path, &self.root) {
+                    if let Some(report) = inspect(&path, &self.root, self.ignored) {
                         self.files.push(report);
                     }
                 }
@@ -187,9 +191,10 @@ fn folder_of(root: &Path, ini: &Path) -> String {
 }
 
 /// Run the engine over one INI. `None` when the file is already up to date.
-fn inspect(ini: &Path, root: &Path) -> Option<FixerFileReport> {
+fn inspect(ini: &Path, root: &Path, ignored: &IgnoreSet) -> Option<FixerFileReport> {
     let folder = folder_of(root, ini);
     let ini_path = ini.display().to_string();
+    let scope = ignored.file_scope(&folder, ini);
 
     let content = match fs::metadata(ini) {
         Ok(metadata) if metadata.len() > MAX_INI_BYTES => {
@@ -199,39 +204,74 @@ fn inspect(ini: &Path, root: &Path) -> Option<FixerFileReport> {
         Ok(_) => match fs::read(ini) {
             Ok(bytes) => decode(&bytes).0,
             Err(error) => {
-                return Some(broken(folder, ini_path, format!("could not read: {error}")));
+                return Some(broken(folder, ini_path, format!("could not read: {error}"), scope));
             }
         },
         Err(error) => {
-            return Some(broken(folder, ini_path, format!("could not stat: {error}")));
+            return Some(broken(folder, ini_path, format!("could not stat: {error}"), scope));
         }
     };
 
-    let outcome = engine::run(&content, Database::bundled());
-    let report = outcome.report;
+    // A file- or mod-scoped ignore does not hide *what* would be fixed: the
+    // engine runs unfiltered and every row is marked ignored. A
+    // recommendation-scoped ignore filters the engine, which then reports the
+    // ignored rewrite without performing it - and without the fixes that keyed
+    // off it, exactly as a later apply with the same list behaves.
+    let keys = match scope {
+        Some(_) => HashSet::new(),
+        None => ignored.keys_for(ini),
+    };
+    let outcome = engine::run_with_ignore(&content, Database::bundled(), &keys);
+    let mut report = outcome.report;
 
     if let Some(error) = report.error {
-        return Some(broken(folder, ini_path, error));
+        return Some(broken(folder, ini_path, error, scope));
     }
 
     if report.updated.is_empty() && report.additions.is_empty() && report.unsupported.is_empty() {
         return None;
     }
 
+    let mut ignored_scope = scope;
+    if scope.is_some() {
+        for update in &mut report.updated {
+            update.ignored = true;
+        }
+        for addition in &mut report.additions {
+            addition.ignored = true;
+        }
+    } else if !report.updated.is_empty() || !report.additions.is_empty() {
+        // Only the per-recommendation list applied: the file is untouched when
+        // every recommendation it has was ignored.
+        if report.updated.iter().all(|change| change.ignored)
+            && report.additions.iter().all(|addition| addition.ignored)
+        {
+            ignored_scope = Some(IGNORE_SCOPE_FIX);
+        }
+    }
+
+    let character = report.character();
     Some(FixerFileReport {
         folder,
         ini_path,
-        character: report.character(),
+        character,
         characters: report.characters,
         updated: report.updated,
         additions: report.additions,
         unsupported: report.unsupported,
         needs_buffer_pass: report.needs_buffer_pass,
+        ignored: ignored_scope.is_some(),
+        ignored_scope,
         error: None,
     })
 }
 
-fn broken(folder: String, ini_path: String, error: String) -> FixerFileReport {
+fn broken(
+    folder: String,
+    ini_path: String,
+    error: String,
+    scope: Option<&'static str>,
+) -> FixerFileReport {
     FixerFileReport {
         folder,
         ini_path,
@@ -241,6 +281,8 @@ fn broken(folder: String, ini_path: String, error: String) -> FixerFileReport {
         additions: Vec::new(),
         unsupported: Vec::new(),
         needs_buffer_pass: false,
+        ignored: scope.is_some(),
+        ignored_scope: scope,
         error: Some(error),
     }
 }
@@ -249,13 +291,22 @@ fn broken(folder: String, ini_path: String, error: String) -> FixerFileReport {
 
 /// Rewrite the given INIs. With `backup` the original is moved to the backup
 /// folder first, exactly where upstream puts it.
-pub fn apply(mods_dir: &Path, ini_paths: &[String], backup: bool) -> AppResult<FixerApplyResult> {
+///
+/// Files covered by `ignored` are never read and never written: the ignore list
+/// is a promise, not a UI hint, so it is enforced here as well.
+pub fn apply(
+    mods_dir: &Path,
+    ini_paths: &[String],
+    backup: bool,
+    ignored: &IgnoreSet,
+) -> AppResult<FixerApplyResult> {
     let root = canonical_dir(mods_dir)?;
     let mut result = FixerApplyResult {
         applied: Vec::new(),
         failed: Vec::new(),
         needs_buffer_pass: Vec::new(),
         unchanged: Vec::new(),
+        ignored: Vec::new(),
     };
     let timestamp = backup::now_seconds();
 
@@ -267,6 +318,15 @@ pub fn apply(mods_dir: &Path, ini_paths: &[String], backup: bool) -> AppResult<F
                 ini_path: path.clone(),
                 error,
             });
+            continue;
+        }
+
+        // Same walk roots the scan used, so the folder matches the ignore list
+        // and the history entry no matter how the Mods path is spelled.
+        let folder = folder_of(mods_dir, &ini);
+        if let Some(scope) = ignored.file_scope(&folder, &ini) {
+            log::info!("Fixer apply: {} left alone ({scope} ignored)", ini.display());
+            result.ignored.push(path.clone());
             continue;
         }
 
@@ -282,7 +342,8 @@ pub fn apply(mods_dir: &Path, ini_paths: &[String], backup: bool) -> AppResult<F
         };
 
         let (content, encoding) = decode(&bytes);
-        let outcome = engine::run(&content, Database::bundled());
+        let keys = ignored.keys_for(&ini);
+        let outcome = engine::run_with_ignore(&content, Database::bundled(), &keys);
         let report = outcome.report;
 
         if let Some(error) = report.error {
@@ -301,13 +362,19 @@ pub fn apply(mods_dir: &Path, ini_paths: &[String], backup: bool) -> AppResult<F
                 .cloned()
                 .collect();
 
-            if pending.is_empty() {
-                result.unchanged.push(path.clone());
-            } else {
+            let skipped = report.updated.iter().any(|change| change.ignored)
+                || report.additions.iter().any(|addition| addition.ignored);
+            if skipped {
+                result.ignored.push(path.clone());
+            }
+
+            if !pending.is_empty() {
                 result.needs_buffer_pass.push(FixerBufferPending {
                     ini_path: path.clone(),
                     commands: pending,
                 });
+            } else if !skipped {
+                result.unchanged.push(path.clone());
             }
             continue;
         }
@@ -338,11 +405,25 @@ pub fn apply(mods_dir: &Path, ini_paths: &[String], backup: bool) -> AppResult<F
             continue;
         }
 
+        let character = report.character();
         result.applied.push(FixerApplied {
             ini_path: path.clone(),
+            folder,
+            character,
+            fixed_at: timestamp,
             backup_path,
-            updated: report.updated,
-            additions: report.additions,
+            // Only what was written: an ignored recommendation is reported by
+            // the scan, never claimed as applied here.
+            updated: report
+                .updated
+                .into_iter()
+                .filter(|change| !change.ignored)
+                .collect(),
+            additions: report
+                .additions
+                .into_iter()
+                .filter(|addition| !addition.ignored)
+                .collect(),
             unsupported: report.unsupported,
             needs_buffer_pass: report.needs_buffer_pass,
         });
@@ -389,6 +470,29 @@ pub fn rollback(mods_dir: &Path, ini_paths: &[String]) -> AppResult<FixerRollbac
     }
 
     Ok(result)
+}
+
+// MARK: history restore
+
+/// Put the original INI back from the backup one recorded fix wrote.
+///
+/// The backup path comes from the fixer history, never from the UI, and only
+/// paths inside the Mods folder are accepted. The exact backup is consumed, so
+/// an older fix of a file that was fixed twice can still be undone.
+pub fn restore_history(mods_dir: &Path, record: &FixerHistoryRecord) -> Result<PathBuf, String> {
+    let root = canonical_dir(mods_dir).map_err(|error| error.to_string())?;
+    let ini = PathBuf::from(&record.ini_path);
+    ensure_inside(&root, &ini)?;
+
+    if record.restored_at.is_some() {
+        return Err("this fix was already restored".to_string());
+    }
+
+    let Some(backup_path) = record.backup_path.as_deref() else {
+        return Err("no backup was kept for this fix, so it cannot be restored".to_string());
+    };
+
+    backup::restore_from(&ini, Path::new(backup_path)).map_err(|error| error.to_string())
 }
 
 fn canonical_dir(dir: &Path) -> AppResult<PathBuf> {
@@ -501,7 +605,7 @@ mod tests {
         // to create a file with exactly that name, so the fixture spells it out.
         fs::write(root.join("DESKTOP_mods.ini"), BROKEN).expect("desktop-named ini");
 
-        let result = scan(&root).expect("scan");
+        let result = scan(&root, &IgnoreSet::default()).expect("scan");
 
         assert_eq!(result.scanned, 1);
         assert_eq!(result.skipped, 2, "DISABLED_*.ini and the DESKTOP-named ini");
@@ -517,7 +621,7 @@ mod tests {
         let ini = broken_mod(&root);
         let before = fs::read(&ini).expect("read");
 
-        let result = scan(&root).expect("scan");
+        let result = scan(&root, &IgnoreSet::default()).expect("scan");
 
         assert_eq!(result.scanned, 1);
         assert_eq!(result.skipped, 0);
@@ -544,7 +648,7 @@ mod tests {
         let ini = broken_mod(&root);
         let before = fs::read(&ini).expect("read");
 
-        let applied = apply(&root, &[ini.display().to_string()], true).expect("apply");
+        let applied = apply(&root, &[ini.display().to_string()], true, &IgnoreSet::default()).expect("apply");
 
         assert!(applied.failed.is_empty(), "{:?}", applied.failed);
         assert_eq!(applied.applied.len(), 1);
@@ -560,7 +664,7 @@ mod tests {
         assert_all_crlf(&after);
 
         // A second apply finds nothing to do.
-        let again = apply(&root, &[ini.display().to_string()], true).expect("apply again");
+        let again = apply(&root, &[ini.display().to_string()], true, &IgnoreSet::default()).expect("apply again");
         assert!(again.applied.is_empty());
         assert_eq!(again.unchanged, vec![ini.display().to_string()]);
         assert_eq!(fs::read_to_string(&ini).expect("read"), after);
@@ -581,7 +685,7 @@ mod tests {
         let outside = root.parent().expect("parent").join("zzmm-fixer-not-a-mod.ini");
         fs::write(&outside, BROKEN).expect("outside ini");
 
-        let result = apply(&root, &[outside.display().to_string()], true).expect("apply");
+        let result = apply(&root, &[outside.display().to_string()], true, &IgnoreSet::default()).expect("apply");
 
         assert!(result.applied.is_empty());
         assert_eq!(result.failed.len(), 1);
@@ -601,6 +705,108 @@ mod tests {
                 "bare LF at byte {index} of:\n{text}"
             );
         }
+    }
+
+    /// Ignoring is enforced by `ops`, not only by the UI: an ignored mod or file
+    /// is never opened, and an ignored recommendation is skipped while the rest
+    /// of the file is still fixed.
+    #[test]
+    fn ignored_scopes_are_reported_and_never_written() {
+        use crate::fixer::model::FixerIgnoredEntry;
+        use crate::fixer::store;
+
+        let root = scratch("ignore");
+        let ini = broken_mod(&root);
+        let before = fs::read(&ini).expect("read");
+        let ini_path = ini.display().to_string();
+
+        let entry = |key: Option<&str>| FixerIgnoredEntry {
+            folder: "S11Mod".to_string(),
+            ini_path: Some(ini_path.clone()),
+            key: key.map(str::to_string),
+            label: "S11Noisy".to_string(),
+            ignored_at: 1,
+        };
+        let ignore_state = |key: Option<&str>| {
+            let mut state = store::FixerState::default();
+            store::set_ignored(&mut state, entry(key), true);
+            IgnoreSet::from_state(&state)
+        };
+
+        // One recommendation ignored: the update is skipped, so the scan shows
+        // nothing left to do for this file.
+        let update_key = engine::hash_key("3c8697e8", "67821d9d");
+        let keys = ignore_state(Some(&update_key));
+
+        let reported = scan(&root, &keys).expect("scan");
+        let file = &reported.files[0];
+        assert!(file.ignored);
+        assert_eq!(file.ignored_scope.as_deref(), Some(IGNORE_SCOPE_FIX));
+        assert_eq!(file.updated.len(), 1);
+        assert!(file.updated[0].ignored);
+        assert_eq!(file.updated[0].key, update_key);
+        assert_eq!(fs::read(&ini).expect("read"), before, "a scan writes nothing");
+
+        let applied = apply(&root, &[ini_path.clone()], true, &keys).expect("apply");
+        assert!(applied.applied.is_empty());
+        assert_eq!(applied.ignored, vec![ini_path.clone()]);
+        assert_eq!(applied.unchanged, Vec::<String>::new());
+        assert_eq!(
+            fs::read(&ini).expect("read"),
+            before,
+            "an ignored recommendation is never written"
+        );
+
+        // A whole-mod ignore needs no recommendation key: the file is skipped
+        // outright, and the scan still shows what it would have fixed.
+        let mut mod_state = store::FixerState::default();
+        store::set_ignored(
+            &mut mod_state,
+            FixerIgnoredEntry {
+                folder: "S11Mod".to_string(),
+                ini_path: None,
+                key: None,
+                label: "S11Mod".to_string(),
+                ignored_at: 1,
+            },
+            true,
+        );
+        let mod_keys = IgnoreSet::from_state(&mod_state);
+
+        let reported = scan(&root, &mod_keys).expect("scan");
+        let file = &reported.files[0];
+        assert_eq!(file.ignored_scope.as_deref(), Some(IGNORE_SCOPE_MOD));
+        assert!(file.updated.iter().all(|change| change.ignored));
+        assert!(file.additions.iter().all(|addition| addition.ignored));
+
+        let applied = apply(&root, &[ini_path.clone()], true, &mod_keys).expect("apply");
+        assert!(applied.applied.is_empty());
+        assert_eq!(applied.ignored, vec![ini_path.clone()]);
+        assert_eq!(fs::read(&ini).expect("read"), before);
+
+        // Ignoring only the added section leaves the hash fix working.
+        let addition = scan(&root, &IgnoreSet::default()).expect("scan").files[0]
+            .additions
+            .first()
+            .cloned()
+            .expect("the fixture adds a section");
+        let keys = ignore_state(Some(&addition.key));
+
+        let applied = apply(&root, &[ini_path.clone()], true, &keys).expect("apply");
+        assert_eq!(applied.applied.len(), 1);
+        let entry = &applied.applied[0];
+        assert_eq!(entry.updated.len(), 1);
+        assert!(entry.additions.is_empty(), "the ignored addition is not claimed");
+        assert_eq!(entry.folder, "S11Mod");
+        assert_eq!(entry.character, "Soldier11");
+        assert!(entry.fixed_at > 0);
+        assert!(entry.backup_path.is_some());
+
+        let after = fs::read_to_string(&ini).expect("read");
+        assert!(after.contains("hash = 67821d9d"));
+        assert!(!after.contains(&addition.section));
+
+        fs::remove_dir_all(&root).ok();
     }
 
 }
