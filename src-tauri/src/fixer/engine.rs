@@ -1113,5 +1113,42 @@ mod tests {
         assert!(outcome.report.additions[0].ignored);
         assert!(outcome.report.error.is_none(), "{:?}", outcome.report.error);
     }
+
+    /// The per-fix scope is one row, not the file: ignoring a recommendation
+    /// must leave every other recommendation in the same INI working.
+    #[test]
+    fn ignoring_one_recommendation_leaves_the_others_in_the_file_working() {
+        // Soldier11 (1.0 head diffuse) and Lucy (1.2 body texcoord) live in
+        // different database entries, so neither depends on the other.
+        let text = "[TextureOverrideSoldier11Head]\r\nhash = 3c8697e8\r\n\r\n[TextureOverrideLucyBody]\r\nhash = 00f11ea6\r\n";
+        let ignored: HashSet<String> = [hash_key("3c8697e8", "67821d9d")].into();
+
+        let outcome = run_with_ignore(text, Database::bundled(), &ignored);
+
+        assert!(outcome.report.error.is_none(), "{:?}", outcome.report.error);
+        assert!(outcome.report.touched);
+
+        let soldier = outcome
+            .report
+            .updated
+            .iter()
+            .find(|change| change.from == "3c8697e8")
+            .expect("the ignored row is still reported");
+        assert!(soldier.ignored);
+
+        let lucy = outcome
+            .report
+            .updated
+            .iter()
+            .find(|change| change.from == "00f11ea6")
+            .expect("the other recommendation still applies");
+        assert!(!lucy.ignored);
+        assert_eq!(lucy.to, "f60dbb9e");
+
+        assert!(outcome.text.contains("hash = 3c8697e8"), "the ignored hash stays");
+        assert!(!outcome.text.contains("67821d9d"));
+        assert!(outcome.text.contains("hash = f60dbb9e"), "the other hash is rewritten");
+        assert!(outcome.text.contains("; hash = 00f11ea6"), "the old value is kept");
+    }
 }
 
