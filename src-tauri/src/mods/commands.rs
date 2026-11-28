@@ -5,8 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
 use crate::mods::loadouts::{self, LoadoutApplyResult, LoadoutSummary};
 use crate::mods::model::{
-    ApplyModStatesResult, CharacterAssignResult, ModDetails, ModScanResult, ModStateFailure,
-    ModStateUpdate,
+    ApplyModStatesResult, ModDetails, ModScanResult, ModStateUpdate,
 };
 use crate::mods::{actions, asset_scope, scanner};
 use crate::state::AppState;
@@ -123,36 +122,6 @@ pub async fn set_mod_character(
     tauri::async_runtime::spawn_blocking(move || {
         actions::set_character(&dir, &folder_name, character.as_deref())?;
         scan_with_progress(&app, &dir)
-    })
-    .await
-    .map_err(|error| AppError::Task(error.to_string()))?
-}
-
-/// Tag several freshly installed folders with one character in a single pass.
-/// Enable/disable state is untouched, so no state backup is required.
-#[tauri::command]
-pub async fn assign_mods_character(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    folder_names: Vec<String>,
-    character: Option<String>,
-) -> AppResult<CharacterAssignResult> {
-    let dir = mods_dir(&state)?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut failed = Vec::new();
-
-        for folder in &folder_names {
-            if let Err(error) = actions::set_character(&dir, folder, character.as_deref()) {
-                failed.push(ModStateFailure {
-                    folder_name: folder.clone(),
-                    message: error.to_string(),
-                });
-            }
-        }
-
-        let scan = scan_with_progress(&app, &dir)?;
-        Ok(CharacterAssignResult { scan, failed })
     })
     .await
     .map_err(|error| AppError::Task(error.to_string()))?

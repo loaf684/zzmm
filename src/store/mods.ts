@@ -33,7 +33,6 @@ interface ModsStore {
   setEnabled: (folderName: string, enabled: boolean) => Promise<void>;
   applyStates: (updates: ModStateUpdate[]) => Promise<boolean>;
   setCharacter: (folderName: string, character: string | null) => Promise<boolean>;
-  assignCharacter: (folderNames: string[], character: string) => Promise<boolean>;
   remove: (folderName: string) => Promise<void>;
   openFolder: (folderName?: string) => Promise<void>;
   setProgress: (progress: ModScanProgress | null) => void;
@@ -219,33 +218,6 @@ export const useModsStore = create<ModsStore>((set, get) => ({
       return true;
     } catch (error) {
       toast.error("Could not update character", toUserMessage(error));
-      return false;
-    }
-  },
-
-  assignCharacter: async (folderNames, character) => {
-    const trimmed = character.trim();
-    if (folderNames.length === 0 || !trimmed) return false;
-
-    try {
-      const result = await api.mods.assignCharacter(folderNames, trimmed);
-      set({ result: result.scan });
-
-      if (result.failed.length > 0) {
-        toast.error(
-          `Tagged ${folderNames.length - result.failed.length} of ${folderNames.length} mods`,
-          result.failed[0]?.message,
-        );
-        return false;
-      }
-
-      toast.success(
-        "Character assigned",
-        `${folderNames.length} mod${folderNames.length === 1 ? "" : "s"} tagged as ${trimmed}.`,
-      );
-      return true;
-    } catch (error) {
-      toast.error("Could not assign character", toUserMessage(error));
       return false;
     }
   },

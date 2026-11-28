@@ -359,18 +359,8 @@ async fn install_download(
         }
 
         // Disable the previous version so two copies are never loaded at once.
-        let replaced = match replace_folder {
-            Some(folder) if !result.installed.iter().any(|name| name == &folder) => {
-                match actions::set_enabled(&mods_dir_owned, &folder, false) {
-                    Ok(()) => Some(folder),
-                    Err(error) => {
-                        log::warn!("Could not disable the previous version {folder}: {error}");
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
+        let replaced =
+            disable_replaced(&mods_dir_owned, &result.installed, replace_folder.as_deref());
 
         Ok(DownloadOutcome {
             mod_id,
@@ -386,6 +376,31 @@ async fn install_download(
     .map_err(|error| AppError::Task(error.to_string()))??;
 
     Ok(outcome)
+}
+
+/// Disable the version a download replaces now that the new folder is on disk.
+///
+/// Returns the folder that was disabled. The new install is never touched: a
+/// `replace_folder` naming it is ignored, and a failed rename is logged and
+/// reported as nothing replaced rather than failing the whole download.
+fn disable_replaced(
+    mods_dir: &Path,
+    installed: &[String],
+    replace_folder: Option<&str>,
+) -> Option<String> {
+    let folder = replace_folder?;
+
+    if installed.iter().any(|name| name == folder) {
+        return None;
+    }
+
+    match actions::set_enabled(mods_dir, folder, false) {
+        Ok(()) => Some(folder.to_string()),
+        Err(error) => {
+            log::warn!("Could not disable the previous version {folder}: {error}");
+            None
+        }
+    }
 }
 
 fn percent_of(received: u64, total: u64) -> u8 {
@@ -461,6 +476,52 @@ mod tests {
         assert_eq!(percent_of(0, 0), 0);
         assert_eq!(percent_of(50, 100), 50);
         assert_eq!(percent_of(200, 100), 100);
+    }
+
+    #[test]
+    fn replacing_an_enabled_mod_disables_it_beside_the_new_disabled_folder() {
+        let root = std::env::temp_dir().join(format!("zzmm-replace-test-{}", std::process::id()));
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        // The user's current version is enabled, so it has no `DISABLED_` prefix.
+        fs::create_dir_all(mods_dir.join("My Skin")).expect("existing mod");
+        fs::write(mods_dir.join("My Skin/mod.ini"), b"[TextureOverride]\n").expect("ini");
+
+        let archive_path = root.join("My Skin.zip");
+        {
+            let file = File::create(&archive_path).expect("create zip");
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            writer.start_file("mod.ini", options).expect("zip entry");
+            writer
+                .write_all(b"[TextureOverride]\nhash = bbbb\n")
+                .expect("write");
+            writer.finish().expect("finish zip");
+        }
+
+        let outcome = install::install_archive_single(
+            &mods_dir,
+            &archive_path,
+            "My Skin",
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        assert_eq!(outcome.error, None);
+
+        // The update yields `DISABLED_My Skin` to the version it replaces, so the
+        // new folder lands disabled *and* the old one can still be disabled.
+        assert_eq!(outcome.installed, vec!["DISABLED_My Skin (2)".to_string()]);
+
+        let replaced = disable_replaced(&mods_dir, &outcome.installed, Some("My Skin"));
+        assert_eq!(replaced, Some("My Skin".to_string()));
+
+        assert!(mods_dir.join("DISABLED_My Skin/mod.ini").is_file());
+        assert!(mods_dir.join("DISABLED_My Skin (2)/mod.ini").is_file());
+        assert!(!mods_dir.join("My Skin").exists());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
