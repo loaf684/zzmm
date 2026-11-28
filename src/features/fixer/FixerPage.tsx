@@ -46,94 +46,6 @@ function normalize(value: string): string {
   return value.replace(/\//g, "\\").toLowerCase();
 }
 
-/** Which whole-file ignore entry covers this ini, most specific first. */
-function fileScopeOf(
-  entries: FixerIgnoredEntry[],
-  folder: string,
-  iniPath: string,
-): IgnoreScope | null {
-  const ini = normalize(iniPath);
-  const mod = normalize(folder);
-
-  if (
-    entries.some(
-      (entry) =>
-        entry.iniPath !== null &&
-        entry.key === null &&
-        normalize(entry.iniPath) === ini,
-    )
-  ) {
-    return "file";
-  }
-
-  if (
-    entries.some(
-      (entry) => entry.iniPath === null && normalize(entry.folder) === mod,
-    )
-  ) {
-    return "mod";
-  }
-
-  return null;
-}
-
-function ignoredKeysOf(
-  entries: FixerIgnoredEntry[],
-  iniPath: string,
-): Set<string> {
-  const ini = normalize(iniPath);
-  const keys = new Set<string>();
-
-  for (const entry of entries) {
-    if (
-      entry.iniPath !== null &&
-      entry.key !== null &&
-      normalize(entry.iniPath) === ini
-    ) {
-      keys.add(entry.key);
-    }
-  }
-
-  return keys;
-}
-
-/**
- * The flags `fixer_scan` sets, recomputed from the ignore list the backend just
- * returned, so a toggle updates the list without another full scan. The backend
- * stays the source of truth: it refuses to write anything this marks ignored.
- */
-function withIgnoreFlags(
-  file: FixerFile,
-  entries: FixerIgnoredEntry[],
-): FixerFile {
-  const scope = fileScopeOf(entries, file.folder, file.iniPath);
-  const keys = ignoredKeysOf(entries, file.iniPath);
-
-  const updated = file.updated.map((change) => ({
-    ...change,
-    ignored: scope !== null || keys.has(change.key),
-  }));
-  const additions = file.additions.map((addition) => ({
-    ...addition,
-    ignored: scope !== null || keys.has(addition.key),
-  }));
-
-  const hasRows = updated.length + additions.length > 0;
-  const everyRowIgnored =
-    hasRows &&
-    updated.every((change) => change.ignored) &&
-    additions.every((addition) => addition.ignored);
-  const ignoredScope = scope ?? (everyRowIgnored ? "fix" : null);
-
-  return {
-    ...file,
-    updated,
-    additions,
-    ignored: ignoredScope !== null,
-    ignoredScope,
-  };
-}
-
 /** A file an apply would still touch: one recommendation is not ignored. */
 function isActionable(file: FixerFile): boolean {
   return (
@@ -216,56 +128,67 @@ export function FixerPage() {
   const rowLabel = (file: FixerFile) =>
     `${file.folder} · ${shortPath(file.iniPath, modsDir)}`;
 
-  /** Write one ignore entry and re-derive the scanned rows from the result. */
+  /**
+   * Read the folder again. `announce` is for a user-initiated scan: it collapses
+   * the details and reports "nothing to fix"; a refresh after an ignore toggle
+   * keeps the page where the user was.
+   */
+  const scanMods = useCallback(
+    async (announce: boolean) => {
+      setScanning(true);
+      setError(null);
+      try {
+        const result = await api.fixer.scan(modsDir);
+        setScan(result);
+        // Ignored files stay listed so they remain visible, but they are not
+        // offered for fixing.
+        setSelected(
+          new Set(
+            result.files
+              .filter((file) => !file.ignored || isActionable(file))
+              .map((file) => file.iniPath),
+          ),
+        );
+        if (announce) {
+          setExpanded(null);
+          if (result.files.filter(isActionable).length === 0) {
+            toast.success(
+              "Nothing to fix",
+              `${result.scanned} ini files already match.`,
+            );
+          }
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setScanning(false);
+      }
+    },
+    [modsDir],
+  );
+
+  const runScan = useCallback(async () => {
+    setApplied(null);
+    await scanMods(true);
+  }, [scanMods]);
+
+  /**
+   * Write one ignore entry, then read the folder again: the backend decides
+   * which rows are ignored now, so the list always matches what an apply does.
+   */
   const applyIgnore = useCallback(
     async (
       target: FixerIgnoreTarget,
       ignoredNow: boolean,
+      rescan = true,
     ): Promise<boolean> => {
       const view = await setIgnored(target, ignoredNow);
       if (!view) return false;
-      if (!scan) return true;
-
-      const files = scan.files.map((file) => withIgnoreFlags(file, view.ignored));
-      setScan({ ...scan, files });
-      setSelected((current) => {
-        const next = new Set(current);
-        for (const file of files) {
-          if (!isActionable(file)) next.delete(file.iniPath);
-        }
-        return next;
-      });
+      if (rescan) await scanMods(false);
       return true;
     },
-    [scan, setIgnored],
+    [scanMods, setIgnored],
   );
-
-  const runScan = useCallback(async () => {
-    setScanning(true);
-    setError(null);
-    setApplied(null);
-    try {
-      const result = await api.fixer.scan(modsDir);
-      setScan(result);
-      // Ignored files stay listed so they remain visible, but they are not
-      // offered for fixing.
-      setSelected(
-        new Set(
-          result.files
-            .filter((file) => !file.ignored || isActionable(file))
-            .map((file) => file.iniPath),
-        ),
-      );
-      setExpanded(null);
-      if (result.files.filter(isActionable).length === 0) {
-        toast.success("Nothing to fix", `${result.scanned} ini files already match.`);
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setScanning(false);
-    }
-  }, [modsDir]);
 
   const runApply = useCallback(async () => {
     const targets = [...selected];
@@ -426,6 +349,7 @@ export function FixerPage() {
           entry.key !== null &&
           normalize(entry.iniPath) === ini,
       );
+      let cleared = true;
       for (const entry of entries) {
         const ok = await applyIgnore(
           {
@@ -435,11 +359,17 @@ export function FixerPage() {
             label: entry.label,
           },
           false,
+          // One scan after the last entry instead of one per entry.
+          false,
         );
-        if (!ok) return;
+        if (!ok) {
+          cleared = false;
+          break;
+        }
       }
+      if (cleared) await scanMods(false);
     },
-    [applyIgnore, ignored],
+    [applyIgnore, ignored, scanMods],
   );
 
   const toggleModIgnore = useCallback(

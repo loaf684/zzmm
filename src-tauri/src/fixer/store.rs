@@ -130,10 +130,6 @@ impl IgnoreSet {
         set
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.mods.is_empty() && self.files.is_empty() && self.fixes.is_empty()
-    }
-
     /// The whole-file scopes covering this INI, most specific first.
     pub fn file_scope(&self, folder: &str, ini: &Path) -> Option<&'static str> {
         if self.files.contains(&normalize(&ini.display().to_string())) {
@@ -436,11 +432,11 @@ mod tests {
         append_history(&mut state, vec![record("C:\\Mods\\S11.ini", 100, None)]);
         assert_eq!(state.history[1].fixed_at, 101);
 
-        let view = view(&state);
-        assert_eq!(view.history.len(), 2);
-        assert_eq!(view.history[0].fixed_at, 101, "newest first");
-        assert!(!view.history[0].backup_available, "no backup was kept");
-        assert!(view.history[1].backup_available);
+        let shown = view(&state);
+        assert_eq!(shown.history.len(), 2);
+        assert_eq!(shown.history[0].fixed_at, 101, "newest first");
+        assert!(!shown.history[0].backup_available, "no backup was kept");
+        assert!(shown.history[1].backup_available);
 
         assert!(find_history(&state, "c:\\mods\\s11.INI", 100).is_some());
         assert!(find_history(&state, "C:\\Mods\\S11.ini", 99).is_none());

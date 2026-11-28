@@ -120,7 +120,7 @@ struct Walk<'a> {
     files: Vec<FixerFileReport>,
 }
 
-impl Walk {
+impl Walk<'_> {
     fn walk(&mut self, dir: &Path, depth: usize) {
         let Ok(entries) = fs::read_dir(dir) else {
             log::warn!("Could not read {}", dir.display());
@@ -261,7 +261,7 @@ fn inspect(ini: &Path, root: &Path, ignored: &IgnoreSet) -> Option<FixerFileRepo
         unsupported: report.unsupported,
         needs_buffer_pass: report.needs_buffer_pass,
         ignored: ignored_scope.is_some(),
-        ignored_scope,
+        ignored_scope: ignored_scope.map(str::to_string),
         error: None,
     })
 }
@@ -282,7 +282,7 @@ fn broken(
         unsupported: Vec::new(),
         needs_buffer_pass: false,
         ignored: scope.is_some(),
-        ignored_scope: scope,
+        ignored_scope: scope.map(str::to_string),
         error: Some(error),
     }
 }
@@ -712,7 +712,7 @@ mod tests {
     /// of the file is still fixed.
     #[test]
     fn ignored_scopes_are_reported_and_never_written() {
-        use crate::fixer::model::FixerIgnoredEntry;
+        use crate::fixer::model::{FixerIgnoredEntry, IGNORE_SCOPE_MOD};
         use crate::fixer::store;
 
         let root = scratch("ignore");

@@ -224,6 +224,10 @@ struct Ctx {
     queued_hashes: Vec<String>,
     queued: VecDeque<Queued>,
     error: Option<String>,
+    /// True once one of this hash's own recommendations was ignored: the rest of
+    /// the bundle would only make sense after the ignored rewrite, so it is
+    /// reported and skipped as well.
+    ignored: bool,
 }
 
 struct Runner<'a> {
@@ -273,6 +277,7 @@ impl<'a> Runner<'a> {
                 queued_hashes: Vec::new(),
                 queued: VecDeque::new(),
                 error: None,
+                ignored: false,
             };
             self.execute_group(entry, &mut ctx);
             stack.extend(ctx.queued_hashes);
@@ -536,6 +541,11 @@ impl<'a> Runner<'a> {
 
         if !matches.is_empty() {
             if self.ignored.contains(&key) {
+                // Skip this hash's whole bundle: the rewrite, and the section
+                // inserts and IB checks that only make sense once the file
+                // carries the newer hash. All of them stay visible in the
+                // report, so the scan says exactly what an apply will not do.
+                ctx.ignored = true;
                 self.report.updated.push(HashUpdate {
                     from: old,
                     to: new_hash.to_string(),
@@ -629,7 +639,7 @@ impl<'a> Runner<'a> {
         let section_name = format!("[TextureOverride{title}]");
         let key = section_key(equivalent, &section_name);
 
-        if self.ignored.contains(&key) {
+        if ctx.ignored || self.ignored.contains(&key) {
             self.report.additions.push(SectionAddition {
                 section: section_name,
                 hash: equivalent.to_string(),
@@ -637,6 +647,16 @@ impl<'a> Runner<'a> {
                 key,
                 ignored: true,
             });
+
+            // Nothing is inserted, but the run still accounts for the section:
+            // without this, a second entry proposing the same section reports it
+            // a second time (and the report would promise two insertions).
+            self.present.insert(equivalent.to_ascii_lowercase());
+            if !ctx.ignored {
+                // Only this recommendation was ignored, so the fixes that key
+                // off the same hash still run.
+                ctx.queued_hashes.push(equivalent.to_string());
+            }
             return;
         }
 
@@ -694,6 +714,12 @@ impl<'a> Runner<'a> {
     /// `add_ib_check_if_missing`: make sure this hash's IB sections run the
     /// skin-texture commandlist, so the mod keeps rendering after an update.
     fn add_ib_check_if_missing(&mut self, ctx: &mut Ctx) {
+        if ctx.ignored {
+            // The hash this check belongs to is not going to be rewritten, so
+            // there is nothing for the check to keep rendering.
+            return;
+        }
+
         let sections = self.sections_with_hash(&ctx.hash);
 
         let mut insertions = Vec::new();
@@ -1050,17 +1076,20 @@ mod tests {
         assert!(outcome.report.updated[0].ignored);
         assert_eq!(outcome.report.updated[0].to, "67821d9d");
         assert_eq!(outcome.report.updated[0].key, update_key, "keys are lowercased");
-        assert!(
-            outcome.report.additions.is_empty(),
-            "fixes keyed off the skipped hash are not attempted either: {:?}",
-            outcome.report.additions
-        );
+        // The section insert bundled with that hash is reported too - visible in
+        // the list, and not written either.
+        assert_eq!(outcome.report.additions.len(), 1);
+        assert!(outcome.report.additions[0].ignored);
+        assert!(outcome.report.error.is_none(), "{:?}", outcome.report.error);
 
-        // The same file without the ignore still rewrites as before.
+        // The same file without the ignore still rewrites and adds the section.
         let plain = run(update, Database::bundled());
         assert!(plain.report.touched);
         assert!(!plain.report.updated[0].ignored);
         assert_eq!(plain.report.updated[0].key, update_key);
+        assert_eq!(plain.report.additions.len(), 1);
+        assert!(!plain.report.additions[0].ignored);
+        assert!(plain.text.contains(&plain.report.additions[0].section));
     }
 
     #[test]
@@ -1068,7 +1097,8 @@ mod tests {
         let text = "[TextureOverrideSoldier11Head]\r\nhash = 3c8697e8\r\nmatch_priority = 0\r\n\r\n[TextureOverrideOther]\r\nhash = ffffffff\r\nib = data.buf\r\n";
 
         let plain = run(text, Database::bundled());
-        let addition = plain.report.additions.first().expect("a section is added").clone();
+        assert_eq!(plain.report.additions.len(), 1, "{:?}", plain.report.additions);
+        let addition = plain.report.additions[0].clone();
         assert!(!addition.ignored);
         assert!(addition.key.starts_with("section:"), "key: {}", addition.key);
 
@@ -1079,9 +1109,9 @@ mod tests {
         assert!(outcome.text.contains("hash = 67821d9d"));
         assert!(!outcome.text.contains(&addition.section));
         assert!(outcome.report.updated.iter().all(|change| !change.ignored));
-        assert_eq!(outcome.report.additions.len(), 1);
+        assert_eq!(outcome.report.additions.len(), 1, "{:?}", outcome.report.additions);
         assert!(outcome.report.additions[0].ignored);
-        assert_eq!(outcome.report.error, None);
+        assert!(outcome.report.error.is_none(), "{:?}", outcome.report.error);
     }
 }
 
