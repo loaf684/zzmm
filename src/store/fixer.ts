@@ -4,8 +4,8 @@ import { api } from "@/lib/api";
 import { toUserMessage } from "@/lib/errors";
 import { toast } from "@/store/toasts";
 import type {
-  FixerHistoryEntry,
   FixerIgnoredEntry,
+  FixerSnapshotEntry,
   FixerStateView,
 } from "@/types/fixer";
 import type { FixerIgnoreTarget } from "@/lib/api/fixer";
@@ -13,8 +13,8 @@ import type { FixerIgnoreTarget } from "@/lib/api/fixer";
 interface FixerStore {
   /** Persisted ignore list, newest entry last. */
   ignored: FixerIgnoredEntry[];
-  /** Persisted fix history, newest first. */
-  history: FixerHistoryEntry[];
+  /** Mods whose last fix can still be undone, newest capture first. */
+  snapshots: FixerSnapshotEntry[];
   isLoading: boolean;
   isBusy: boolean;
   /** Set when the state file could not be read, so the lists are incomplete. */
@@ -28,13 +28,13 @@ interface FixerStore {
 }
 
 /**
- * The ignore list and the fix history, backed by `fixer_state`. The page reads
- * this on mount, so both survive navigating to another tab and back (and an app
- * restart: the backend keeps them in the config folder).
+ * The ignore list and the restorable snapshots, backed by `fixer_state`. The
+ * page reads this on mount, so both survive navigating to another tab and back
+ * (and an app restart: the backend keeps them in the config folder).
  */
 export const useFixerStore = create<FixerStore>((set) => ({
   ignored: [],
-  history: [],
+  snapshots: [],
   isLoading: false,
   isBusy: false,
   loadError: null,
@@ -45,7 +45,7 @@ export const useFixerStore = create<FixerStore>((set) => ({
       const view = await api.fixer.state();
       set({
         ignored: view.ignored,
-        history: view.history,
+        snapshots: view.snapshots,
         isLoading: false,
         loadError: null,
       });
@@ -60,7 +60,7 @@ export const useFixerStore = create<FixerStore>((set) => ({
       const view = await api.fixer.setIgnored(target, ignored);
       set({
         ignored: view.ignored,
-        history: view.history,
+        snapshots: view.snapshots,
         isLoading: false,
         loadError: null,
         isBusy: false,

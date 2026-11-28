@@ -103,10 +103,9 @@ pub fn run() {
             mesh_loader::commands::save_preview_toggles,
             fixer::commands::fixer_scan,
             fixer::commands::fixer_apply,
-            fixer::commands::fixer_rollback,
+            fixer::commands::fixer_undo,
             fixer::commands::fixer_state,
             fixer::commands::fixer_ignore,
-            fixer::commands::fixer_restore,
         ])
         .run(tauri::generate_context!());
 

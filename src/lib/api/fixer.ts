@@ -1,9 +1,9 @@
 import { call } from "@/lib/api/client";
 import type {
   FixerApplyResult,
-  FixerRollbackResult,
   FixerScanResult,
   FixerStateView,
+  FixerUndoResult,
 } from "@/types/fixer";
 
 /** One entry to add to or remove from the persisted ignore list. */
@@ -24,19 +24,20 @@ export const fixerApi = {
     return call<FixerScanResult>("fixer_scan", { modsDir });
   },
 
+  /**
+   * Rewrite the named inis. With `snapshot`, each written mod's single undo
+   * snapshot becomes the state this run overwrote; without it, a stale snapshot
+   * for a written mod is dropped.
+   */
   apply(
     modsDir: string,
     iniPaths: string[],
-    backup: boolean,
+    snapshot: boolean,
   ): Promise<FixerApplyResult> {
-    return call<FixerApplyResult>("fixer_apply", { modsDir, iniPaths, backup });
+    return call<FixerApplyResult>("fixer_apply", { modsDir, iniPaths, snapshot });
   },
 
-  rollback(modsDir: string, iniPaths: string[]): Promise<FixerRollbackResult> {
-    return call<FixerRollbackResult>("fixer_rollback", { modsDir, iniPaths });
-  },
-
-  /** The persisted ignore list and fix history. */
+  /** The persisted ignore list and the mods an undo can still put back. */
   state(): Promise<FixerStateView> {
     return call<FixerStateView>("fixer_state");
   },
@@ -59,19 +60,10 @@ export const fixerApi = {
   },
 
   /**
-   * Put the original ini back from the backup one recorded fix wrote. The
-   * backup path lives in the stored history, so this can only restore files the
-   * fixer itself recorded.
+   * Put one mod back from its undo snapshot: the state right before its most
+   * recent fix. The stored originals live in the backend, never in the caller.
    */
-  restore(
-    modsDir: string,
-    iniPath: string,
-    fixedAt: number,
-  ): Promise<FixerRollbackResult> {
-    return call<FixerRollbackResult>("fixer_restore", {
-      modsDir,
-      iniPath,
-      fixedAt,
-    });
+  undo(modsDir: string, folder: string): Promise<FixerUndoResult> {
+    return call<FixerUndoResult>("fixer_undo", { modsDir, folder });
   },
 };

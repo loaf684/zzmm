@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
-  ArchiveRestore,
   ArrowRight,
   Ban,
   CheckCircle2,
   FileWarning,
-  History,
   Loader2,
-  RotateCcw,
   ShieldCheck,
   Undo2,
   Wrench,
@@ -28,9 +25,9 @@ import { toast } from "@/store/toasts";
 import type {
   FixerApplyResult,
   FixerFile,
-  FixerHistoryEntry,
   FixerIgnoredEntry,
   FixerScanResult,
+  FixerSnapshotEntry,
   IgnoreScope,
 } from "@/types/fixer";
 
@@ -87,18 +84,10 @@ function changeSummary(file: FixerFile): string {
   return parts.join(" · ");
 }
 
-/** Accurate answer to "can this fix be undone?", from the backend's disk check. */
-function restoreStatus(entry: FixerHistoryEntry): string {
-  if (entry.restoredAt) return `restored ${formatDate(entry.restoredAt)}`;
-  if (!entry.backupPath) return "no backup was kept";
-  if (!entry.backupAvailable) return "backup no longer on disk";
-  return "backup ready";
-}
-
 export function FixerPage() {
   const modsDir = useSettingsStore((state) => state.view?.settings.modsDir ?? "");
   const ignored = useFixerStore((state) => state.ignored);
-  const history = useFixerStore((state) => state.history);
+  const snapshots = useFixerStore((state) => state.snapshots);
   const fixerStateError = useFixerStore((state) => state.loadError);
   const loadFixerState = useFixerStore((state) => state.load);
   const setIgnored = useFixerStore((state) => state.setIgnored);
@@ -107,20 +96,17 @@ export function FixerPage() {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [backup, setBackup] = useState(true);
+  const [keepSnapshot, setKeepSnapshot] = useState(true);
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState<FixerApplyResult | null>(null);
-  const [rollingBack, setRollingBack] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [pendingRestore, setPendingRestore] = useState<{
-    entries: FixerHistoryEntry[];
-    title: string;
-    description: string;
-  } | null>(null);
-  const [restoring, setRestoring] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState<FixerSnapshotEntry | null>(
+    null,
+  );
+  const [undoing, setUndoing] = useState(false);
 
-  // The ignore list and the history live in the config folder, so this is what
-  // makes both survive leaving the Fixer route and coming back.
+  // The ignore list and the undo snapshots live in the config folder, so this
+  // is what makes both survive leaving the Fixer route and coming back.
   useEffect(() => {
     void loadFixerState();
   }, [loadFixerState]);
@@ -140,15 +126,10 @@ export function FixerPage() {
       try {
         const result = await api.fixer.scan(modsDir);
         setScan(result);
-        // Ignored files stay listed so they remain visible, but they are not
-        // offered for fixing.
-        setSelected(
-          new Set(
-            result.files
-              .filter((file) => !file.ignored || isActionable(file))
-              .map((file) => file.iniPath),
-          ),
-        );
+        // A mod- or file-scoped ignore is hidden by the backend already; a file
+        // whose every recommendation is ignored one by one stays listed (so the
+        // fixes can be unignored) but is never selected.
+        setSelected(new Set(result.files.filter(isActionable).map((file) => file.iniPath)));
         if (announce) {
           setExpanded(null);
           if (result.files.filter(isActionable).length === 0) {
@@ -196,7 +177,7 @@ export function FixerPage() {
     setApplying(true);
     setError(null);
     try {
-      const result = await api.fixer.apply(modsDir, targets, backup);
+      const result = await api.fixer.apply(modsDir, targets, keepSnapshot);
       setApplied(result);
       const remaining = new Set(selected);
       for (const entry of result.applied) remaining.delete(entry.iniPath);
@@ -205,7 +186,9 @@ export function FixerPage() {
       if (result.applied.length > 0) {
         toast.success(
           `Fixed ${result.applied.length} ini file${result.applied.length === 1 ? "" : "s"}`,
-          backup ? "Backups were written before each change." : "No backups were kept.",
+          keepSnapshot
+            ? "Each mod's previous state is kept for undo."
+            : "No undo snapshot was kept.",
         );
       }
       if (result.ignored.length > 0) {
@@ -220,96 +203,49 @@ export function FixerPage() {
           result.failed[0]?.error,
         );
       }
-      // The files that were written just became history entries.
+      // The mods that were written now have an undo snapshot to show.
       await loadFixerState();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setApplying(false);
     }
-  }, [backup, loadFixerState, modsDir, selected]);
+  }, [keepSnapshot, loadFixerState, modsDir, selected]);
 
-  const runRollback = useCallback(async () => {
-    const paths = applied?.applied.map((entry) => entry.iniPath) ?? [];
-    if (paths.length === 0) return;
-    setRollingBack(true);
-    setError(null);
-    try {
-      const result = await api.fixer.rollback(modsDir, paths);
-      if (result.restored.length > 0) {
-        toast.success(
-          `Restored ${result.restored.length} file${result.restored.length === 1 ? "" : "s"}`,
-          "The original inis are back in place.",
-        );
-      }
-      if (result.failed.length > 0) {
-        toast.error("Some files could not be restored", result.failed[0]?.error);
-      }
-      setApplied(null);
-      setScan(null);
-      // Those backups are consumed now, so availability changed.
-      await loadFixerState();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRollingBack(false);
-    }
-  }, [applied, loadFixerState, modsDir]);
-
-  const runRestore = useCallback(
-    async (entries: FixerHistoryEntry[]) => {
-      // A fix whose backup is gone is never offered as restorable, and the
-      // backend refuses it anyway.
-      const targets = entries.filter(
-        (entry) => entry.backupAvailable && !entry.restoredAt,
-      );
-      if (targets.length === 0) {
-        setPendingRestore(null);
-        return;
-      }
-
-      setRestoring(true);
+  /**
+   * Put one mod back from its snapshot. The backend decides what the snapshot
+   * holds and consumes only the files it actually restored, so a retry after a
+   * failure redoes just that file.
+   */
+  const runUndo = useCallback(
+    async (snapshot: FixerSnapshotEntry) => {
+      setUndoing(true);
       setError(null);
-      let restored = 0;
-      const failures: string[] = [];
-
-      for (const entry of targets) {
-        try {
-          const result = await api.fixer.restore(
-            modsDir,
-            entry.iniPath,
-            entry.fixedAt,
+      try {
+        const result = await api.fixer.undo(modsDir, snapshot.folder);
+        if (result.restored.length > 0) {
+          toast.success(
+            `Undid the last fix in ${snapshot.folder}`,
+            `${result.restored.length} ini file${result.restored.length === 1 ? "" : "s"} back to the previous state.`,
           );
-          restored += result.restored.length;
-          for (const failure of result.failed) {
-            failures.push(`${shortPath(failure.iniPath, modsDir)}: ${failure.error}`);
-          }
-        } catch (cause) {
-          failures.push(
-            `${shortPath(entry.iniPath, modsDir)}: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
+          // The files on disk no longer match the last scan.
+          setScan(null);
+          setApplied(null);
+        }
+        if (result.failed.length > 0) {
+          toast.error(
+            `${result.failed.length} file${result.failed.length === 1 ? "" : "s"} could not be restored`,
+            result.failed[0]?.error,
           );
         }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        // The snapshot is consumed (or shrunk) either way.
+        await loadFixerState();
+        setUndoing(false);
+        setPendingUndo(null);
       }
-
-      // Backups were consumed and the entries were marked restored.
-      await loadFixerState();
-      if (restored > 0) {
-        toast.success(
-          `Restored ${restored} file${restored === 1 ? "" : "s"}`,
-          "The original inis are back in place.",
-        );
-        // The files on disk no longer match the last scan.
-        setScan(null);
-        setApplied(null);
-      }
-      if (failures.length > 0) {
-        toast.error("Some files could not be restored", failures[0]);
-      }
-
-      setRestoring(false);
-      setPendingRestore(null);
     },
     [loadFixerState, modsDir],
   );
@@ -324,24 +260,10 @@ export function FixerPage() {
         return;
       }
 
-      if (file.ignoredScope === "mod") {
-        await applyIgnore(
-          { folder: file.folder, iniPath: null, label: file.folder },
-          false,
-        );
-        return;
-      }
-
-      if (file.ignoredScope === "file") {
-        await applyIgnore(
-          { folder: file.folder, iniPath: file.iniPath, label: rowLabel(file) },
-          false,
-        );
-        return;
-      }
-
-      // `fix`: the recommendations were ignored one by one, so removing them
-      // one by one is what brings the file back.
+      // Only a `fix` scope can be showing: a mod- or file-scoped ignore hides
+      // the row, and the ignore list panel is where those come back from. The
+      // recommendations were ignored one by one, so removing them one by one is
+      // what brings the file back.
       const ini = normalize(file.iniPath);
       const entries = ignored.filter(
         (entry) =>
@@ -406,33 +328,18 @@ export function FixerPage() {
     let hashes = 0;
     let sections = 0;
     let bufferPass = 0;
-    let ignoredFiles = 0;
     for (const file of files) {
       hashes += file.updated.filter((change) => !change.ignored).length;
       sections += file.additions.filter((addition) => !addition.ignored).length;
       if (file.needsBufferPass) bufferPass += 1;
-      if (file.ignored) ignoredFiles += 1;
     }
     return {
       hashes,
       sections,
       bufferPass,
-      ignoredFiles,
       unsupported: files.reduce((sum, file) => sum + file.unsupported.length, 0),
     };
   }, [files]);
-
-  const runs = useMemo(() => {
-    const grouped = new Map<number, FixerHistoryEntry[]>();
-    for (const entry of history) {
-      const list = grouped.get(entry.fixedAt);
-      if (list) list.push(entry);
-      else grouped.set(entry.fixedAt, [entry]);
-    }
-    return [...grouped.entries()]
-      .map(([fixedAt, entries]) => ({ fixedAt, entries }))
-      .sort((left, right) => right.fixedAt - left.fixedAt);
-  }, [history]);
 
   return (
     <div className="mx-auto w-full max-w-[1100px] px-8 py-8">
@@ -486,10 +393,12 @@ export function FixerPage() {
           <span className={files.length > 0 ? "text-acid-300" : "text-zinc-500"}>
             {files.length} need fixes
           </span>
-          {totals.ignoredFiles > 0 ? (
+          {scan.ignored > 0 ? (
             <>
               <span className="text-zinc-700">|</span>
-              <span className="text-amber-300">{totals.ignoredFiles} ignored</span>
+              <span className="text-amber-300">
+                {scan.ignored} hidden by the ignore list
+              </span>
             </>
           ) : null}
           {totals.hashes > 0 ? (
@@ -560,20 +469,18 @@ export function FixerPage() {
           <label className="flex items-center gap-2 border-b border-ink-700/60 px-5 py-3 text-[12px] text-zinc-400">
             <input
               type="checkbox"
-              checked={backup}
-              onChange={(event) => setBackup(event.target.checked)}
+              checked={keepSnapshot}
+              onChange={(event) => setKeepSnapshot(event.target.checked)}
               className="h-3.5 w-3.5 accent-acid-400"
             />
-            Keep a backup of every changed ini (written next to the mod, the same
-            way the community fixer does)
+            Keep one undo snapshot per mod (the original inis are copied into
+            ZZMM&apos;s config folder, replacing the previous snapshot)
           </label>
 
           <ul className="divide-y divide-ink-700/60">
             {files.map((file) => {
               const isSelected = selected.has(file.iniPath);
               const isOpen = expanded === file.iniPath;
-              const scopeIgnored =
-                file.ignoredScope === "mod" || file.ignoredScope === "file";
               const mod = normalize(file.folder);
               const modIgnored = ignored.some(
                 (entry) => entry.iniPath === null && normalize(entry.folder) === mod,
@@ -699,16 +606,14 @@ export function FixerPage() {
                                 ignored
                               </span>
                             ) : null}
-                            {scopeIgnored
-                              ? null
-                              : ignoreButton(
-                                  change.key,
-                                  change.ignored,
-                                  `${rowLabel(file)} · ${
-                                    change.from ?? "(missing)"
-                                  } → ${change.to}`,
-                                  "shrink-0 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-300",
-                                )}
+                            {ignoreButton(
+                              change.key,
+                              change.ignored,
+                              `${rowLabel(file)} · ${
+                                change.from ?? "(missing)"
+                              } → ${change.to}`,
+                              "shrink-0 font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-300",
+                            )}
                           </li>
                         ))}
                         {file.additions.map((addition) => (
@@ -735,9 +640,7 @@ export function FixerPage() {
                                 ignored
                               </span>
                             ) : null}
-                            {scopeIgnored
-                              ? null
-                              : ignoreButton(
+                            {ignoreButton(
                                   addition.key,
                                   addition.ignored,
                                   `${rowLabel(file)} · add ${addition.section}`,
@@ -802,7 +705,7 @@ export function FixerPage() {
           className="mt-6"
           eyebrow="Ignore list"
           title={`${ignored.length} fix${ignored.length === 1 ? "" : "es"} the fixer leaves alone`}
-          description="Saved in ZZMM's config folder, so they survive restarts and later scans. The fixer never writes to an ignored ini, and nothing here edits a mod."
+          description="Saved in ZZMM's config folder, so they survive restarts and later scans. An ignored mod or ini is hidden from the scan; unignore it here and it comes back. The fixer never writes to an ignored ini, and nothing here edits a mod."
         >
           <ul className="divide-y divide-ink-700/60">
             {[...ignored]
@@ -851,12 +754,7 @@ export function FixerPage() {
           className="mt-6"
           eyebrow="Last run"
           title={`${applied.applied.length} file${applied.applied.length === 1 ? "" : "s"} rewritten`}
-          action={
-            <Button variant="outline" size="sm" loading={rollingBack} onClick={() => void runRollback()}>
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-              Restore originals
-            </Button>
-          }
+          description="Undo lives below, per mod: one snapshot each, the state right before that mod's most recent fix."
         >
           <ul className="divide-y divide-ink-700/60">
             {applied.applied.map((entry) => (
@@ -870,9 +768,9 @@ export function FixerPage() {
                   {entry.additions.length > 0
                     ? ` · ${entry.additions.length} section${entry.additions.length === 1 ? "" : "s"} added`
                     : ""}
-                  {entry.backupPath
-                    ? ` · backup ${entry.backupPath}`
-                    : " · no backup"}
+                  {entry.snapshot
+                    ? " · undo snapshot saved"
+                    : " · no undo snapshot"}
                 </p>
               </li>
             ))}
@@ -913,108 +811,50 @@ export function FixerPage() {
         </Panel>
       ) : null}
 
-      {runs.length > 0 ? (
+      {snapshots.length > 0 ? (
         <Panel
           className="mt-6"
-          eyebrow="Fix history"
-          title="Previous fixes"
-          description="Every ini ZZMM rewrote, newest run first, kept in ZZMM's config folder. Restore puts the file back from the backup that run wrote; a fix whose backup is gone cannot be restored."
+          eyebrow="Undo"
+          title={`${snapshots.length} mod${snapshots.length === 1 ? "" : "s"} can go back one fix`}
+          description="Each mod keeps one snapshot: how its inis were right before its most recent fix. A newer fix replaces it, so there is never more than one state per mod and the stored copies do not grow with the number of fixes."
         >
-          <ul className="space-y-4">
-            {runs.map((run) => {
-              const restorable = run.entries.filter(
-                (entry) => entry.backupAvailable && !entry.restoredAt,
-              );
-              return (
-                <li key={run.fixedAt} className="border border-ink-700/50">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700/50 px-4 py-2.5">
-                    <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">
-                      <History className="h-3.5 w-3.5 text-zinc-600" aria-hidden />
-                      {formatDate(run.fixedAt)} · {run.entries.length} file
-                      {run.entries.length === 1 ? "" : "s"}
-                      {restorable.length < run.entries.length
-                        ? ` · ${run.entries.length - restorable.length} not restorable`
-                        : ""}
-                    </p>
-                    {restorable.length > 0 ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setPendingRestore({
-                            entries: run.entries,
-                            title:
-                              restorable.length === 1
-                                ? "Restore this file?"
-                                : `Restore ${restorable.length} files?`,
-                            description:
-                              restorable.length === 1
-                                ? `${shortPath(restorable[0].iniPath, modsDir)} goes back to how it was before this fix. The backup is consumed.`
-                                : `${restorable.length} files go back to how they were before this run. Their backups are consumed. Files whose backup is gone are skipped.`,
-                          })
-                        }
-                      >
-                        <ArchiveRestore className="h-3.5 w-3.5" aria-hidden />
-                        Restore{" "}
-                        {restorable.length === 1
-                          ? "original"
-                          : `all ${restorable.length}`}
-                      </Button>
-                    ) : null}
-                  </div>
-                  <ul className="divide-y divide-ink-700/40">
-                    {run.entries.map((entry) => (
-                      <li
-                        key={`${entry.iniPath}-${entry.fixedAt}`}
-                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5"
-                      >
-                        <div className="min-w-0">
-                          <p
-                            className="truncate font-mono text-[10px] text-zinc-400"
-                            title={entry.iniPath}
-                          >
-                            {entry.folder} · {shortPath(entry.iniPath, modsDir)}
-                          </p>
-                          <p className="mt-1 font-mono text-[10px] text-zinc-600">
-                            {entry.updated} hash
-                            {entry.updated === 1 ? "" : "es"}
-                            {entry.additions > 0
-                              ? ` · ${entry.additions} section${entry.additions === 1 ? "" : "s"}`
-                              : ""}
-                            {" · "}
-                            <span
-                              className={cn(
-                                entry.backupAvailable && !entry.restoredAt
-                                  ? "text-zinc-500"
-                                  : "text-amber-300/80",
-                              )}
-                            >
-                              {restoreStatus(entry)}
-                            </span>
-                          </p>
-                        </div>
-                        {entry.backupAvailable && !entry.restoredAt ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() =>
-                              setPendingRestore({
-                                entries: [entry],
-                                title: "Restore this file?",
-                                description: `${shortPath(entry.iniPath, modsDir)} goes back to how it was before this fix. The backup is consumed.`,
-                              })
-                            }
-                          >
-                            <ArchiveRestore className="h-3.5 w-3.5" aria-hidden />
-                            Restore
-                          </Button>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </li>
-              );
-            })}
+          <ul className="divide-y divide-ink-700/60">
+            {snapshots.map((snapshot) => (
+              <li
+                key={snapshot.folder}
+                className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
+              >
+                <div className="min-w-0">
+                  <p
+                    className="truncate font-mono text-[10px] text-zinc-300"
+                    title={snapshot.folder}
+                  >
+                    {snapshot.folder}
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] text-zinc-600">
+                    {snapshot.files} ini{snapshot.files === 1 ? "" : "s"} ·{" "}
+                    {formatDate(snapshot.capturedAt)} · captured before the last
+                    fix
+                  </p>
+                  <p
+                    className="mt-1 truncate font-mono text-[10px] text-zinc-600"
+                    title={snapshot.iniPaths.join("\n")}
+                  >
+                    {snapshot.iniPaths
+                      .map((iniPath) => shortPath(iniPath, modsDir))
+                      .join(", ")}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPendingUndo(snapshot)}
+                >
+                  <Undo2 className="h-3.5 w-3.5" aria-hidden />
+                  Undo last fix
+                </Button>
+              </li>
+            ))}
           </ul>
         </Panel>
       ) : null}
@@ -1025,7 +865,7 @@ export function FixerPage() {
           Vonksdesu/ZZZ-Mod-Fixer
         </span>{" "}
         (community continuation of petrascyll&apos;s tool). Fixing changes files
-        inside your Mods folder - keep the backup option on unless you already
+        inside your Mods folder - keep the undo snapshot on unless you already
         keep your own copies.
       </p>
 
@@ -1037,16 +877,24 @@ export function FixerPage() {
       ) : null}
 
       <ConfirmDialog
-        open={pendingRestore !== null}
-        title={pendingRestore?.title ?? "Restore the original?"}
-        description={pendingRestore?.description ?? ""}
-        confirmLabel={restoring ? "Restoring..." : "Restore"}
+        open={pendingUndo !== null}
+        title={
+          pendingUndo
+            ? `Undo the last fix in ${pendingUndo.folder}?`
+            : "Undo the last fix?"
+        }
+        description={
+          pendingUndo
+            ? `${pendingUndo.files} ini${pendingUndo.files === 1 ? "" : "s"} go back to how they were right before the most recent fix in this mod. Nothing older is restored, and the snapshot is used up.`
+            : ""
+        }
+        confirmLabel={undoing ? "Undoing..." : "Undo"}
         destructive
-        busy={restoring}
+        busy={undoing}
         onConfirm={() => {
-          if (pendingRestore) void runRestore(pendingRestore.entries);
+          if (pendingUndo) void runUndo(pendingUndo);
         }}
-        onCancel={() => setPendingRestore(null)}
+        onCancel={() => setPendingUndo(null)}
       />
     </div>
   );

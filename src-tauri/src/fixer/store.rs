@@ -1,9 +1,9 @@
-//! What the fixer remembers between runs: the ignore list and the history of
-//! successful fixes.
+//! What the fixer remembers between runs: the ignore list.
 //!
 //! One small JSON file in the app config folder, next to `settings.json`, read
 //! at every scan and written with the project's atomic temp-file + rename.
-//! Nothing here touches a mod's INI: ignoring a mod writes this file only.
+//! Nothing here touches a mod's INI: ignoring a mod writes this file only. The
+//! per-mod undo snapshots live beside it in `fixer-undo` (`fixer::undo`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,21 +12,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
-use crate::fixer::backup;
 use crate::fixer::model::{
-    FixerHistoryEntry, FixerHistoryRecord, FixerIgnoredEntry, FixerStateView,
-    IGNORE_SCOPE_FILE, IGNORE_SCOPE_MOD,
+    FixerIgnoredEntry, FixerSnapshotEntry, FixerStateView, IGNORE_SCOPE_FILE, IGNORE_SCOPE_MOD,
 };
-
+use crate::fixer::undo;
 use crate::ini_parser::text;
 
 pub const STATE_FILE: &str = "fixer.json";
 
-const SCHEMA_VERSION: u32 = 1;
-
-/// History entries kept. Older records are dropped from the file; their backups
-/// on disk are left alone, so trimming never destroys a restore.
-const MAX_HISTORY: usize = 200;
+/// Bumped when the file's shape changes: 2 dropped the per-fix history that
+/// accumulated one backup per run (the bounded `fixer-undo` snapshots replaced
+/// it). Older files load as they are - the unknown field is ignored and the
+/// ignore list is preserved.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,8 +33,6 @@ pub struct FixerState {
     pub version: u32,
     #[serde(default)]
     pub ignored: Vec<FixerIgnoredEntry>,
-    #[serde(default)]
-    pub history: Vec<FixerHistoryRecord>,
 }
 
 fn schema_version() -> u32 {
@@ -48,7 +44,6 @@ impl Default for FixerState {
         Self {
             version: SCHEMA_VERSION,
             ignored: Vec::new(),
-            history: Vec::new(),
         }
     }
 }
@@ -75,7 +70,7 @@ pub fn load(path: &Path) -> FixerState {
     match serde_json::from_str::<FixerState>(&raw) {
         Ok(state) => state,
         Err(error) => {
-            let aside = path.with_extension(format!("json.corrupt-{}", backup::now_seconds()));
+            let aside = path.with_extension(format!("json.corrupt-{}", crate::util::unix_now()));
             log::error!(
                 "{} is not valid JSON ({error}); moving it aside to {}",
                 path.display(),
@@ -190,76 +185,24 @@ fn same_path(left: Option<&str>, right: Option<&str>) -> bool {
     }
 }
 
-/// Append the records of a successful run, bumping `fixedAt` by a second when
-/// two fixes of one file land in the same second, so `(iniPath, fixedAt)` stays
-/// a unique id for a restore request - the same trick `backup::stash` uses for
-/// backup file names.
-pub fn append_history(state: &mut FixerState, records: Vec<FixerHistoryRecord>) {
-    for mut record in records {
-        while state.history.iter().any(|existing| same_fix(existing, &record)) {
-            record.fixed_at += 1;
-        }
-        state.history.push(record);
-    }
-
-    if state.history.len() > MAX_HISTORY {
-        state.history.drain(..state.history.len() - MAX_HISTORY);
-        log::info!("Fixer history trimmed to the newest {MAX_HISTORY} entries");
-    }
-}
-
-fn same_fix(left: &FixerHistoryRecord, right: &FixerHistoryRecord) -> bool {
-    left.fixed_at == right.fixed_at && normalize(&left.ini_path) == normalize(&right.ini_path)
-}
-
-/// The recorded fix a restore request refers to. The backup path comes from
-/// here, never from the UI.
-pub fn find_history<'a>(
-    state: &'a FixerState,
-    ini_path: &str,
-    fixed_at: u64,
-) -> Option<&'a FixerHistoryRecord> {
-    state
-        .history
-        .iter()
-        .find(|record| record.fixed_at == fixed_at && normalize(&record.ini_path) == normalize(ini_path))
-}
-
-/// Mark a recorded fix as undone. False when the entry is gone.
-pub fn mark_restored(state: &mut FixerState, ini_path: &str, fixed_at: u64, when: u64) -> bool {
-    match state.history.iter_mut().find(|record| {
-        record.fixed_at == fixed_at && normalize(&record.ini_path) == normalize(ini_path)
-    }) {
-        Some(record) => {
-            record.restored_at = Some(when);
-            true
-        }
-        None => false,
-    }
-}
-
-/// The UI shape: the ignore list as stored, and the history newest first with
-/// every backup checked on disk right now.
-pub fn view(state: &FixerState) -> FixerStateView {
+/// The UI shape: the ignore list as stored, and every mod whose last fix can
+/// still be undone, newest capture first. Whether a snapshot is usable is
+/// answered by reading the undo folder on disk *now*, never cached.
+pub fn view(config_dir: &Path, state: &FixerState) -> FixerStateView {
     FixerStateView {
         ignored: state.ignored.clone(),
-        history: state
-            .history
-            .iter()
-            .rev()
-            .map(|record| FixerHistoryEntry {
-                ini_path: record.ini_path.clone(),
-                folder: record.folder.clone(),
-                character: record.character.clone(),
-                backup_path: record.backup_path.clone(),
-                backup_available: record
-                    .backup_path
-                    .as_deref()
-                    .is_some_and(|path| Path::new(path).is_file()),
-                fixed_at: record.fixed_at,
-                updated: record.updated,
-                additions: record.additions,
-                restored_at: record.restored_at,
+        snapshots: undo::list(config_dir)
+            .into_iter()
+            .map(|snapshot| FixerSnapshotEntry {
+                folder: snapshot.manifest.folder.clone(),
+                captured_at: snapshot.manifest.captured_at,
+                files: snapshot.manifest.files.len() as u32,
+                ini_paths: snapshot
+                    .manifest
+                    .files
+                    .iter()
+                    .map(|file| file.ini_path.clone())
+                    .collect(),
             })
             .collect(),
     }
@@ -300,19 +243,6 @@ mod tests {
         }
     }
 
-    fn record(ini_path: &str, fixed_at: u64, backup: Option<&str>) -> FixerHistoryRecord {
-        FixerHistoryRecord {
-            ini_path: ini_path.to_string(),
-            folder: "Mod".to_string(),
-            character: "Soldier11".to_string(),
-            backup_path: backup.map(str::to_string),
-            fixed_at,
-            updated: 2,
-            additions: 1,
-            restored_at: None,
-        }
-    }
-
     #[test]
     fn state_round_trips_and_a_corrupt_file_is_kept_aside() {
         let dir = scratch("roundtrip");
@@ -320,12 +250,15 @@ mod tests {
 
         let mut state = FixerState::default();
         assert!(set_ignored(&mut state, ignored("S11Mod", None, "S11Mod"), true));
-        append_history(&mut state, vec![record("C:\\Mods\\S11Mod\\S11.ini", 10, None)]);
+        assert!(set_ignored(
+            &mut state,
+            ignored_fix("S11Mod", "C:\\Mods\\S11Mod\\S11.ini", "hash:3c8697e8>67821d9d"),
+            true
+        ));
         save(&file, &state).expect("save");
 
         let loaded = load(&file);
         assert_eq!(loaded.ignored, state.ignored);
-        assert_eq!(loaded.history, state.history);
         assert_eq!(loaded.version, SCHEMA_VERSION);
 
         fs::write(&file, "{ not json").expect("corrupt it");
@@ -336,6 +269,57 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains("corrupt"))
             .count();
         assert_eq!(kept_aside, 1, "the unreadable file is not deleted");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file written by the version that kept a per-fix history still has to
+    /// load: the ignore list is the user's, and nothing about it may change.
+    #[test]
+    fn an_older_state_file_keeps_its_ignore_list() {
+        let dir = scratch("older");
+        let file = path_in(&dir);
+        fs::write(
+            &file,
+            r#"{
+              "version": 1,
+              "ignored": [
+                {
+                  "folder": "S11Mod",
+                  "iniPath": null,
+                  "key": null,
+                  "label": "S11Mod",
+                  "ignoredAt": 1700000000
+                }
+              ],
+              "history": [
+                {
+                  "iniPath": "C:\\Mods\\S11Mod\\S11.ini",
+                  "folder": "S11Mod",
+                  "character": "Soldier11",
+                  "backupPath": "C:\\Mods\\S11Mod\\DISABLED_BACKUP_1_S11.txt",
+                  "fixedAt": 1700000000,
+                  "updated": 1,
+                  "additions": 0
+                }
+              ]
+            }"#,
+        )
+        .expect("write");
+
+        let loaded = load(&file);
+        assert_eq!(loaded.ignored.len(), 1);
+        assert_eq!(loaded.ignored[0].label, "S11Mod");
+        assert_eq!(
+            IgnoreSet::from_state(&loaded).file_scope("s11mod", Path::new("C:\\Mods\\S11Mod\\a.ini")),
+            Some(IGNORE_SCOPE_MOD)
+        );
+
+        // Saving drops the history instead of carrying it forward.
+        save(&file, &loaded).expect("save");
+        let raw = fs::read_to_string(&file).expect("read");
+        assert!(!raw.contains("history"));
+        assert!(raw.contains("S11Mod"));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -420,47 +404,34 @@ mod tests {
     }
 
     #[test]
-    fn history_keeps_one_id_per_fix_and_reports_availability_from_disk() {
-        let dir = scratch("history");
-        let file = path_in(&dir);
-        let backup = dir.join("DISABLED_BACKUP_100_S11.txt");
-        fs::write(&backup, b"[TextureOverrideX]\r\nhash = 3c8697e8\r\n").expect("backup");
-
+    fn the_view_reports_the_snapshots_on_disk_newest_first() {
+        let dir = scratch("view");
         let mut state = FixerState::default();
-        append_history(&mut state, vec![record("C:\\Mods\\S11.ini", 100, Some(&backup.display().to_string()))]);
-        // A second fix of the same file in the same second must not collide.
-        append_history(&mut state, vec![record("C:\\Mods\\S11.ini", 100, None)]);
-        assert_eq!(state.history[1].fixed_at, 101);
+        set_ignored(&mut state, ignored("S11Mod", None, "S11Mod"), true);
 
-        let shown = view(&state);
-        assert_eq!(shown.history.len(), 2);
-        assert_eq!(shown.history[0].fixed_at, 101, "newest first");
-        assert!(!shown.history[0].backup_available, "no backup was kept");
-        assert!(shown.history[1].backup_available);
+        assert!(view(&dir, &state).snapshots.is_empty(), "nothing captured yet");
 
-        assert!(find_history(&state, "c:\\mods\\s11.INI", 100).is_some());
-        assert!(find_history(&state, "C:\\Mods\\S11.ini", 99).is_none());
+        let capture = |folder: &str, when: u64, ini: &str| {
+            let mut writer = undo::Writer::begin(&dir, folder, when).expect("begin");
+            writer.add(ini, b"pre-fix\n").expect("add");
+            writer.commit().expect("commit");
+        };
+        capture("S11Mod", 100, "C:\\Mods\\S11Mod\\S11.ini");
+        capture("Ellen Mod", 200, "C:\\Mods\\Ellen Mod\\body\\merged.ini");
 
-        assert!(mark_restored(&mut state, "C:\\Mods\\S11.ini", 100, 500));
-        assert_eq!(state.history[0].restored_at, Some(500));
+        let shown = view(&dir, &state);
+        assert_eq!(shown.ignored.len(), 1);
+        assert_eq!(shown.snapshots.len(), 2);
+        assert_eq!(shown.snapshots[0].folder, "Ellen Mod", "newest capture first");
+        assert_eq!(shown.snapshots[0].captured_at, 200);
+        assert_eq!(shown.snapshots[0].files, 1);
+        assert_eq!(shown.snapshots[0].ini_paths, vec!["C:\\Mods\\Ellen Mod\\body\\merged.ini"]);
+        assert_eq!(shown.snapshots[1].folder, "S11Mod");
 
-        // A consumed backup reads as unavailable, not as "restorable".
-        fs::remove_file(&backup).expect("consume");
-        save(&file, &state).expect("save");
-        assert!(!view(&load(&file)).history[1].backup_available);
+        // Undoing consumes the snapshot, so the view stops offering it.
+        undo::discard(&dir, "Ellen Mod").expect("discard");
+        assert_eq!(view(&dir, &state).snapshots.len(), 1);
 
         fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn history_is_trimmed_to_the_newest_entries() {
-        let mut state = FixerState::default();
-        let records = (0..MAX_HISTORY as u64 + 5)
-            .map(|index| record(&format!("C:\\Mods\\Mod{index}\\m.ini"), index, None))
-            .collect();
-        append_history(&mut state, records);
-
-        assert_eq!(state.history.len(), MAX_HISTORY);
-        assert_eq!(state.history[0].fixed_at, 5);
     }
 }
