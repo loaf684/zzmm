@@ -62,6 +62,10 @@ const NSFW_OPTIONS: { value: NsfwFilter; label: string }[] = [
   { value: "nsfw", label: "NSFW only" },
 ];
 
+/** One segment's width. The sliding thumb and every segment share the literal
+ *  `w-[116px]` class, so the thumb's offset is exactly the index times this. */
+const NSFW_SEGMENT_PX = 116;
+
 /** Suggestions for the character field. GameBanana's subcategory names are
  *  matched by substring, so partial names like "Ellen" work too. */
 const CHARACTER_SUGGESTIONS = [
@@ -190,6 +194,10 @@ export function BrowsePage() {
     filters.search || filters.character || filters.categoryId !== null,
   );
 
+  // The thumb slides to the selected segment. The store only ever holds one of
+  // the three values (its reader falls back to SFW), so the index always hits.
+  const nsfwIndex = NSFW_OPTIONS.findIndex((option) => option.value === filters.nsfw);
+
   // The unfiltered page opens as a storefront: a trending spotlight, real
   // trending shelves, then the catalog. The shelves come from their own
   // `sort=trending` requests, so the feed's sort and Load more cannot relabel
@@ -259,10 +267,41 @@ export function BrowsePage() {
           </p>
         </div>
 
-        <Button variant="outline" size="sm" onClick={refresh} loading={isLoading}>
-          <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-          Refresh
-        </Button>
+        <div className="flex flex-col items-end gap-2.5">
+          <Button variant="outline" size="sm" onClick={refresh} loading={isLoading}>
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+            Refresh
+          </Button>
+
+          <div
+            role="group"
+            aria-label="Content filter"
+            title="Filter by GameBanana's mature-content setting"
+            className="relative inline-flex items-center rounded-full border border-ink-700 bg-ink-900/70 p-0.5"
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0.5 left-0.5 w-[116px] rounded-full bg-zinc-100 transition-transform duration-200 ease-out motion-reduce:transition-none"
+              style={{ transform: `translateX(${nsfwIndex * NSFW_SEGMENT_PX}px)` }}
+            />
+            {NSFW_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setNsfw(option.value)}
+                aria-pressed={filters.nsfw === option.value}
+                className={cn(
+                  "relative z-10 inline-flex w-[116px] items-center justify-center rounded-full py-1.5 font-display text-[10px] uppercase tracking-[0.16em] transition-colors",
+                  filters.nsfw === option.value
+                    ? "text-ink-950"
+                    : "text-zinc-500 hover:text-zinc-200",
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </header>
 
       {unfiltered && !spotlight && !railsError && (isLoading || railsLoading) ? (
@@ -441,26 +480,6 @@ export function BrowsePage() {
           ariaLabel="Filter by character"
           className="w-[164px]"
         />
-
-        <div className="relative">
-          <select
-            value={filters.nsfw}
-            onChange={(event) => setNsfw(event.target.value as NsfwFilter)}
-            aria-label="Content filter"
-            title="Filter by GameBanana's mature-content setting"
-            className="h-10 w-[140px] appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
-          >
-            {NSFW_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500"
-            aria-hidden
-          />
-        </div>
 
         {activeFilters ? (
           <Button
