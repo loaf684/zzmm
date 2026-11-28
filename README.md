@@ -46,7 +46,7 @@ ZZMM keeps a Zenless Zone Zero mod library organized: it scans your Mods folder,
 - **Loadouts** — snapshot the library's enabled/disabled state and restore it later without touching mods added afterward.
 - **GameBanana** — browse, search, filter and sort ZZZ mods, open a mod page, and install without leaving the app.
 - **Updates** — compare stored file IDs against GameBanana; updates install beside the old folder and disable it instead of deleting.
-- **Archives** — drop `.zip` / `.7z` / `.rar` anywhere; wrapper folders and multi-mod packs are detected, and existing folders are never overwritten.
+- **Archives** — drop `.zip` / `.7z` / `.rar` anywhere; wrapper folders and multi-mod packs are detected, and existing folders are never overwritten. A new mod is enabled unless another mod for the same character is already installed.
 - **3D preview** — render a mod's mesh and decoded DDS textures from its INI, with per-part visibility, wireframe, and controls for the mod's part/visibility toggles (bind pose).
 - **Hotkeys** — view and rebind hotkeys inline, detect conflicts across enabled mods, and create a one-time `.ini.bak` on first save.
 
@@ -90,8 +90,9 @@ pnpm tauri build    # build zzmm.exe and the installers
 
 1. Install XXMI Launcher and let it set up ZZMI.
 2. Link your `.../XXMI Launcher/ZZMI/Mods` folder in **Settings** (auto-detection suggests common paths).
-3. Install a mod by dropping an archive or browsing GameBanana.
-4. Enable it in the library, then press **F10** in-game to reload ZZMI.
+3. Install a mod by dropping an archive or browsing GameBanana. It is enabled
+   automatically, unless another mod for the same character is already installed.
+4. Press **F10** in-game to reload ZZMI.
 
 ## Architecture
 

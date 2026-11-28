@@ -96,59 +96,6 @@ export const useModsStore = create<ModsStore>((set, get) => ({
   setEnabled: async (folderName, enabled) => {
     if (get().busyFolder) return;
 
-    const settings = useSettingsStore.getState().view?.settings;
-    const mods = get().result?.mods ?? [];
-
-    // One-active-per-character: enabling a mod disables the other enabled mods
-    // for that character in the same batch (and writes a safety backup).
-    if (enabled && settings?.oneActivePerCharacter) {
-      const target = mods.find((mod) => mod.folderName === folderName);
-      const character = target?.character.trim() ?? "";
-      const siblings =
-        target && target.character.trim() !== "" && character !== "Uncategorized"
-          ? mods.filter(
-              (mod) =>
-                mod.enabled &&
-                mod.folderName !== folderName &&
-                mod.character.trim() === character,
-            )
-          : [];
-
-      if (siblings.length > 0) {
-        set({ busyFolder: folderName });
-
-        try {
-          const result = await api.mods.applyStates([
-            { folderName, enabled: true },
-            ...siblings.map((mod) => ({
-              folderName: mod.folderName,
-              enabled: false,
-            })),
-          ]);
-          set({ result: result.scan, busyFolder: null, progress: null });
-
-          if (result.failed.length > 0) {
-            toast.error(
-              "Some mods could not be updated",
-              result.failed[0]?.message,
-            );
-          } else {
-            toast.success(
-              "Mod enabled",
-              `Disabled ${siblings.length} other ${character} mod${
-                siblings.length === 1 ? "" : "s"
-              } to keep one active.`,
-            );
-          }
-          if (result.changed.length > 0) remindReload();
-        } catch (error) {
-          set({ busyFolder: null, progress: null });
-          toast.error("Could not update mod", toUserMessage(error));
-        }
-        return;
-      }
-    }
-
     set({ busyFolder: folderName });
 
     try {

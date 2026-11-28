@@ -6,8 +6,6 @@
 export interface Settings {
   schemaVersion: number;
   modsDir: string | null;
-  /** Auto-disable other enabled mods for the same character. */
-  oneActivePerCharacter: boolean;
 }
 
 export interface ModsDirState {

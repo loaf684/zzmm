@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,17 +8,18 @@ use crate::error::{AppError, AppResult};
 use crate::installer::extract;
 use crate::installer::model::{ArchiveInstallOutcome, InstallProgress};
 use crate::installer::root;
-use crate::mods::scanner::DISABLED_PREFIX;
+use crate::mods::scanner::{self, DISABLED_PREFIX};
 
 const RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// Install every mod found in one archive. Every installed folder gets the
-/// ZZMI `DISABLED_` prefix so a fresh archive is off until the user enables it.
-/// Failures are reported in the outcome instead of aborting a multi-archive
-/// drop.
+/// Install every mod found in one archive. A folder lands enabled, unless
+/// another mod for the same confidently identified character is already
+/// installed — then it gets the ZZMI `DISABLED_` prefix so two outfits for one
+/// character are never active at once. Failures are reported in the outcome
+/// instead of aborting a multi-archive drop.
 pub fn install_archive(
     mods_dir: &Path,
     archive_path: &Path,
@@ -41,6 +43,7 @@ pub fn install_archive(
         mods_dir,
         archive_path,
         &archive_name,
+        None,
         None,
         cancel,
         &mut outcome,
@@ -83,11 +86,15 @@ pub fn install_archive(
 /// its INIs across sibling folders (`body/`, `face/`, `hair/`). GameBanana
 /// files are one mod, so flattening every INI root into the Mods folder would
 /// show the same download as several installed entries. Like the drag-and-drop
-/// installer, the folder lands disabled until the user enables it.
+/// installer, the folder lands enabled unless another mod for the same
+/// confidently identified character is already installed. `character_hint` is a
+/// character the download source already knows (GameBanana's character
+/// subcategory) before any `.zzmm.json` has been written.
 pub fn install_archive_single(
     mods_dir: &Path,
     archive_path: &Path,
     preferred_name: &str,
+    character_hint: Option<&str>,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(InstallProgress),
 ) -> ArchiveInstallOutcome {
@@ -109,6 +116,7 @@ pub fn install_archive_single(
         archive_path,
         &archive_name,
         Some(preferred_name),
+        character_hint,
         cancel,
         &mut outcome,
         emit,
@@ -151,6 +159,7 @@ fn install_inner(
     archive_path: &Path,
     archive_name: &str,
     single: Option<&str>,
+    character_hint: Option<&str>,
     cancel: &AtomicBool,
     outcome: &mut ArchiveInstallOutcome,
     emit: &mut dyn FnMut(InstallProgress),
@@ -210,6 +219,11 @@ fn install_inner(
         )));
     }
 
+    // Characters already installed decide which new folders land disabled. The
+    // set grows as this install places folders, so a pack holding several mods
+    // for one character keeps only the first enabled.
+    let mut installed = installed_characters(mods_dir);
+
     if let Some(preferred_name) = single {
         let preferred = if preferred_name.trim().is_empty() {
             archive_path
@@ -219,11 +233,14 @@ fn install_inner(
         } else {
             preferred_name.to_string()
         };
-        let destination = unique_destination(mods_dir, &preferred);
+        let base = sanitize_folder_name(&preferred);
+        let character = scanner::staged_character(&base, &roots, character_hint);
+        let disabled = character.map_or(false, |character| installed.contains(character));
+        let destination = unique_destination(mods_dir, &base, disabled);
         let installed_name = destination
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or(preferred);
+            .unwrap_or(base);
 
         emit(InstallProgress {
             archive: archive_name.to_string(),
@@ -277,11 +294,14 @@ fn install_inner(
                 .unwrap_or_default()
         };
 
-        let destination = unique_destination(mods_dir, &preferred);
+        let base = sanitize_folder_name(&preferred);
+        let character = scanner::staged_character(&base, std::slice::from_ref(source), None);
+        let disabled = character.map_or(false, |character| installed.contains(character));
+        let destination = unique_destination(mods_dir, &base, disabled);
         let installed_name = destination
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| preferred.clone());
+            .unwrap_or_else(|| base.clone());
 
         let percent = 70 + (((index as u32 * 25) / total as u32) as u8);
 
@@ -289,11 +309,14 @@ fn install_inner(
             archive: archive_name.to_string(),
             stage: "installing".to_string(),
             percent,
-            message: format!("Installing {installed_name}…"),
+            message: format!("Installing {installed_name}..."),
         });
 
         match move_folder(source, &destination, cancel) {
             Ok(()) => {
+                if let Some(character) = character {
+                    installed.insert(character.to_string());
+                }
                 log::info!("Installed {} as {}", archive_name, installed_name);
                 outcome.installed.push(installed_name);
             }
@@ -437,27 +460,72 @@ fn sanitize_folder_name(raw: &str) -> String {
     limited
 }
 
-/// Unique destination for an installed mod. Every install lands disabled, so the
-/// name carries the ZZMI `DISABLED_` prefix used by the enable/disable toggle.
-///
-/// A name is skipped while its plain twin is on disk too: a folder and its
-/// `DISABLED_` counterpart cannot be renamed into each other, so installing
-/// `DISABLED_Mod` beside an existing `Mod` would leave that mod impossible to
-/// disable later (the toggle would find the target name taken). This is what
-/// keeps the GameBanana update path able to disable the replaced version.
-fn unique_destination(mods_dir: &Path, preferred: &str) -> PathBuf {
-    let base = sanitize_folder_name(preferred);
-    let disabled = |name: &str| format!("{DISABLED_PREFIX}{name}");
-    let free = |name: &str| !mods_dir.join(name).exists();
+/// Confident characters already present in the Mods folder, enabled or not. A
+/// new mod for one of them lands disabled so two outfits for the same character
+/// are never active at once. A mod whose character cannot be pinned to a known
+/// ZZZ character never collides (see `characters::confident_character`).
+fn installed_characters(mods_dir: &Path) -> HashSet<String> {
+    let mut characters = HashSet::new();
 
-    if free(&disabled(&base)) && free(&base) {
-        return mods_dir.join(disabled(&base));
+    let Ok(entries) = fs::read_dir(mods_dir) else {
+        return characters;
+    };
+
+    for entry in entries.flatten() {
+        let folder_name = entry.file_name().to_string_lossy().to_string();
+        if folder_name.starts_with('.') {
+            continue;
+        }
+
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let (_, base_name) = scanner::split_disabled(&folder_name);
+        if base_name.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(character) = scanner::installed_character(&entry.path(), &base_name) {
+            characters.insert(character.to_string());
+        }
+    }
+
+    characters
+}
+
+/// Unique destination for an installed mod. `disabled` mirrors the caller's
+/// collision decision: a colliding mod keeps the ZZMI `DISABLED_` prefix, every
+/// other install lands enabled.
+///
+/// A name is skipped while its twin is on disk too: a folder and its
+/// `DISABLED_` counterpart cannot be renamed into each other, so installing
+/// `Mod` beside an existing `DISABLED_Mod` would leave that mod impossible to
+/// enable later (the toggle would find the target name taken). This is what
+/// keeps the GameBanana update path able to disable the replaced version.
+fn unique_destination(mods_dir: &Path, preferred: &str, disabled: bool) -> PathBuf {
+    let base = sanitize_folder_name(preferred);
+    let free = |name: &str| !mods_dir.join(name).exists();
+    let taken = |name: &str| !free(name) || !free(&format!("{DISABLED_PREFIX}{name}"));
+    let leaf = |name: &str| {
+        if disabled {
+            format!("{DISABLED_PREFIX}{name}")
+        } else {
+            name.to_string()
+        }
+    };
+
+    if !taken(&base) {
+        return mods_dir.join(leaf(&base));
     }
 
     for index in 2..=999u32 {
         let suffixed = format!("{base} ({index})");
-        if free(&disabled(&suffixed)) && free(&suffixed) {
-            return mods_dir.join(disabled(&suffixed));
+        if !taken(&suffixed) {
+            return mods_dir.join(leaf(&suffixed));
         }
     }
 
@@ -466,7 +534,7 @@ fn unique_destination(mods_dir: &Path, preferred: &str) -> PathBuf {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
-    mods_dir.join(disabled(&format!("{base} ({fallback})")))
+    mods_dir.join(leaf(&format!("{base} ({fallback})")))
 }
 
 /// Put every detected root under one mod folder, keeping each root's name.
@@ -551,6 +619,24 @@ mod tests {
         dir
     }
 
+    /// Build a zip with one INI entry per path, so a test only states the
+    /// folder layout it cares about.
+    fn write_archive(path: &Path, entries: &[&str]) {
+        let file = fs::File::create(path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        for entry in entries {
+            writer.start_file(*entry, options).expect("zip entry");
+            writer
+                .write_all(b"[TextureOverride]\nhash = aaaa\n")
+                .expect("write");
+        }
+
+        writer.finish().expect("finish zip");
+    }
+
     #[test]
     fn sanitizes_windows_names_and_deduplicates() {
         assert_eq!(sanitize_folder_name("Ellen: Joe?"), "Ellen Joe");
@@ -559,16 +645,25 @@ mod tests {
 
         let mods_dir = temp_dir("zzmm-name-test");
 
-        // Fresh installs land disabled, so the destination already carries the prefix.
+        // A plain install keeps its name; a colliding one carries the prefix.
         assert_eq!(
-            unique_destination(&mods_dir, "ModA"),
-            mods_dir.join("DISABLED_ModA")
+            unique_destination(&mods_dir, "ModA", false),
+            mods_dir.join("ModA")
+        );
+        assert_eq!(
+            unique_destination(&mods_dir, "ModC", true),
+            mods_dir.join("DISABLED_ModC")
         );
 
-        // A pre-existing disabled twin forces a suffix instead of landing enabled.
+        // A pre-existing disabled twin forces a suffix: the pair cannot be
+        // renamed into each other, so the enabled name is already taken.
         fs::create_dir_all(mods_dir.join("DISABLED_ModA")).expect("existing disabled mod");
         assert_eq!(
-            unique_destination(&mods_dir, "ModA"),
+            unique_destination(&mods_dir, "ModA", false),
+            mods_dir.join("ModA (2)")
+        );
+        assert_eq!(
+            unique_destination(&mods_dir, "ModA", true),
             mods_dir.join("DISABLED_ModA (2)")
         );
 
@@ -576,7 +671,11 @@ mod tests {
         // impossible to disable later (the rename target would be taken).
         fs::create_dir_all(mods_dir.join("ModB")).expect("existing enabled mod");
         assert_eq!(
-            unique_destination(&mods_dir, "ModB"),
+            unique_destination(&mods_dir, "ModB", false),
+            mods_dir.join("ModB (2)")
+        );
+        assert_eq!(
+            unique_destination(&mods_dir, "ModB", true),
             mods_dir.join("DISABLED_ModB (2)")
         );
 
@@ -607,17 +706,18 @@ mod tests {
             &mods_dir,
             &archive_path,
             "Seed Thicc",
+            None,
             &AtomicBool::new(false),
             &mut |_| {},
         );
 
         assert_eq!(outcome.error, None);
-        // A GameBanana download lands disabled, like a dropped archive.
-        assert_eq!(outcome.installed, vec!["DISABLED_Seed Thicc".to_string()]);
-        assert!(mods_dir.join("DISABLED_Seed Thicc/body/body.ini").is_file());
-        assert!(mods_dir.join("DISABLED_Seed Thicc/face/face.ini").is_file());
-        assert!(mods_dir.join("DISABLED_Seed Thicc/hair/hair.ini").is_file());
-        assert!(!mods_dir.join("Seed Thicc").exists());
+        // A GameBanana download lands enabled, like a dropped archive.
+        assert_eq!(outcome.installed, vec!["Seed Thicc".to_string()]);
+        assert!(mods_dir.join("Seed Thicc/body/body.ini").is_file());
+        assert!(mods_dir.join("Seed Thicc/face/face.ini").is_file());
+        assert!(mods_dir.join("Seed Thicc/hair/hair.ini").is_file());
+        assert!(!mods_dir.join("DISABLED_Seed Thicc").exists());
         assert!(!mods_dir.join("body").exists());
         assert!(!mods_dir.join("face").exists());
         assert!(!mods_dir.join("hair").exists());
@@ -719,26 +819,7 @@ mod tests {
         fs::create_dir_all(&mods_dir).expect("mods dir");
 
         let archive_path = root.join("Pack.zip");
-        {
-            let file = fs::File::create(&archive_path).expect("create zip");
-            let mut writer = zip::ZipWriter::new(file);
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-
-            writer
-                .start_file("Pack/ModA/mod.ini", options)
-                .expect("zip entry");
-            writer
-                .write_all(b"[TextureOverrideA]\nhash = aaaa\n")
-                .expect("write");
-            writer
-                .start_file("Pack/ModB/mod.ini", options)
-                .expect("zip entry");
-            writer
-                .write_all(b"[TextureOverrideB]\nhash = bbbb\n")
-                .expect("write");
-            writer.finish().expect("finish zip");
-        }
+        write_archive(&archive_path, &["Pack/ModA/mod.ini", "Pack/ModB/mod.ini"]);
 
         let mut stages = Vec::new();
 
@@ -753,11 +834,11 @@ mod tests {
 
         assert_eq!(first.error, None);
         assert_eq!(first.installed.len(), 2);
-        assert!(mods_dir.join("DISABLED_ModA/mod.ini").is_file());
-        assert!(mods_dir.join("DISABLED_ModB/mod.ini").is_file());
-        // A fresh archive stays disabled until the user enables it.
-        assert!(!mods_dir.join("ModA").exists());
-        assert!(!mods_dir.join("ModB").exists());
+        // Neither folder names a known character, so both land enabled.
+        assert!(mods_dir.join("ModA/mod.ini").is_file());
+        assert!(mods_dir.join("ModB/mod.ini").is_file());
+        assert!(!mods_dir.join("DISABLED_ModA").exists());
+        assert!(!mods_dir.join("DISABLED_ModB").exists());
         assert!(stages.iter().any(|stage| stage == "done"));
 
         let second = install_archive(
@@ -767,8 +848,8 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(second.error, None);
-        assert!(second.installed.contains(&"DISABLED_ModA (2)".to_string()));
-        assert!(second.installed.contains(&"DISABLED_ModB (2)".to_string()));
+        assert!(second.installed.contains(&"ModA (2)".to_string()));
+        assert!(second.installed.contains(&"ModB (2)".to_string()));
 
         // Staging is always cleaned up.
         let staging_leftovers = fs::read_dir(&mods_dir)
@@ -816,8 +897,164 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(outcome.error, None);
-        assert_eq!(outcome.installed, vec!["DISABLED_My Ellen Skin".to_string()]);
-        assert!(mods_dir.join("DISABLED_My Ellen Skin/mod.ini").is_file());
+        assert_eq!(outcome.installed, vec!["My Ellen Skin".to_string()]);
+        assert!(mods_dir.join("My Ellen Skin/mod.ini").is_file());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The first mod for a character has nothing to collide with, so it lands
+    /// enabled even when its folder names a known character.
+    #[test]
+    fn a_first_mod_for_a_character_lands_enabled() {
+        let root = temp_dir("zzmm-install-first-test");
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        let archive_path = root.join("EllenMod.zip");
+        write_archive(&archive_path, &["mod.ini"]);
+
+        let outcome = install_archive(
+            &mods_dir,
+            &archive_path,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["EllenMod".to_string()]);
+        assert!(mods_dir.join("EllenMod/mod.ini").is_file());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Same character as an installed mod: the new folder lands disabled and the
+    /// pre-existing mod keeps both its name and its enabled state.
+    #[test]
+    fn a_second_mod_for_the_same_character_lands_disabled() {
+        let root = temp_dir("zzmm-install-collision-test");
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        fs::create_dir_all(mods_dir.join("Ellen Joe Streetwear")).expect("existing mod");
+        fs::write(
+            mods_dir.join("Ellen Joe Streetwear/mod.ini"),
+            b"[TextureOverride]\n",
+        )
+        .expect("ini");
+
+        let archive_path = root.join("EllenMod.zip");
+        write_archive(&archive_path, &["mod.ini"]);
+
+        let outcome = install_archive(
+            &mods_dir,
+            &archive_path,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["DISABLED_EllenMod".to_string()]);
+        assert!(mods_dir.join("DISABLED_EllenMod/mod.ini").is_file());
+        // Nothing pre-existing was renamed.
+        assert!(mods_dir.join("Ellen Joe Streetwear/mod.ini").is_file());
+        assert!(!mods_dir.join("DISABLED_Ellen Joe Streetwear").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A mod whose only signal resolves to a different character never collides.
+    #[test]
+    fn mods_for_different_characters_stay_enabled() {
+        let root = temp_dir("zzmm-install-distinct-test");
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        fs::create_dir_all(mods_dir.join("Ellen Joe Streetwear")).expect("existing mod");
+        fs::write(
+            mods_dir.join("Ellen Joe Streetwear/mod.ini"),
+            b"[TextureOverride]\n",
+        )
+        .expect("ini");
+
+        let archive_path = root.join("NicoleMod.zip");
+        write_archive(&archive_path, &["mod.ini"]);
+
+        let outcome = install_archive(
+            &mods_dir,
+            &archive_path,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["NicoleMod".to_string()]);
+        assert!(mods_dir.join("NicoleMod/mod.ini").is_file());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `[Tag]` prefix that is not a ZZZ character, and a name with no
+    /// character at all, must never look like a collision.
+    #[test]
+    fn ambiguous_or_uncategorized_mods_do_not_collide() {
+        let root = temp_dir("zzmm-install-ambiguous-test");
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        fs::create_dir_all(mods_dir.join("[4K] Outfit A")).expect("existing mod");
+        fs::write(
+            mods_dir.join("[4K] Outfit A/mod.ini"),
+            b"[TextureOverride]\n",
+        )
+        .expect("ini");
+
+        let tagged = root.join("[4K] Outfit B.zip");
+        write_archive(&tagged, &["mod.ini"]);
+        let outcome = install_archive(&mods_dir, &tagged, &AtomicBool::new(false), &mut |_| {});
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["[4K] Outfit B".to_string()]);
+
+        let plain = root.join("Some Random Outfit.zip");
+        write_archive(&plain, &["mod.ini"]);
+        let outcome = install_archive(&mods_dir, &plain, &AtomicBool::new(false), &mut |_| {});
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["Some Random Outfit".to_string()]);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The GameBanana single-folder path applies the same rule, using the
+    /// character category the download source already knows.
+    #[test]
+    fn a_download_for_an_installed_character_lands_disabled() {
+        let root = temp_dir("zzmm-install-single-collision-test");
+        let mods_dir = root.join("Mods");
+        fs::create_dir_all(&mods_dir).expect("mods dir");
+
+        fs::create_dir_all(mods_dir.join("Ellen Joe Streetwear")).expect("existing mod");
+        fs::write(
+            mods_dir.join("Ellen Joe Streetwear/mod.ini"),
+            b"[TextureOverride]\n",
+        )
+        .expect("ini");
+
+        let archive_path = root.join("Summer Dress.zip");
+        write_archive(&archive_path, &["mod.ini"]);
+
+        let outcome = install_archive_single(
+            &mods_dir,
+            &archive_path,
+            "Summer Dress",
+            Some("Ellen Joe"),
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.installed, vec!["DISABLED_Summer Dress".to_string()]);
+        assert!(mods_dir.join("DISABLED_Summer Dress/mod.ini").is_file());
+        assert!(mods_dir.join("Ellen Joe Streetwear/mod.ini").is_file());
 
         fs::remove_dir_all(&root).ok();
     }

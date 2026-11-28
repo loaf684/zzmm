@@ -132,10 +132,12 @@ overwritten. Relative folder paths are resolved to absolute paths on save.
 ```json
 {
   "schemaVersion": 1,
-  "modsDir": "C:\\XXMI\\ZZMI\\Mods",
-  "oneActivePerCharacter": false
+  "modsDir": "C:\\XXMI\\ZZMI\\Mods"
 }
 ```
+
+Unknown fields are ignored on load, so a file written by an older build that
+still carries `oneActivePerCharacter` keeps working.
 
 ### Per-mod metadata
 
@@ -164,8 +166,6 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - Saving rejects paths that do not exist or are not directories.
 - Bounded auto-detection of common XXMI Launcher / XXMI / ZZMI install folders.
 - Shows local settings/log locations and the app version.
-- **One active mod per character** optionally disables the other enabled mods for
-  the same character when one is enabled. `Uncategorized` mods are never touched.
 
 ### Installed mods
 
@@ -174,9 +174,9 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - Detects the ZZMI `DISABLED_` prefix case-insensitively; enabling removes it.
 - Enable/disable, delete (with confirmation), and open-in-Explorer per mod, plus
   a button to open the Mods folder itself.
-- Groups mods by character: `.zzmm.json` first, then a meaningful
-  `[Character]` folder prefix, then a best-effort ZZZ roster, otherwise
-  **Uncategorized**. The character can be overridden from the detail panel.
+- Groups mods by character: `.zzmm.json` first, then a best-effort ZZZ roster,
+  then a meaningful `[Character]` folder prefix, otherwise **Uncategorized**. The
+  character can be overridden from the detail panel.
 - The sidebar owns the primary library filters: search (`q`), enabled state
   (`state=all|enabled|disabled`) and character (`character`). The page mirrors
   them as URL params, so the sidebar, the compact toolbar and deep links stay in
@@ -237,9 +237,13 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
   nested folders below a root stay part of that mod. This supports both a single
   mod wrapped in folders and packs containing several mods.
 - Multiple mods in one archive are installed as separate folders.
-- Installed folders get the ZZMI `DISABLED_` prefix, so a fresh install — dropped
-  archive or GameBanana download — stays off until you enable it from the
-  Installed page.
+- Installed folders land enabled, unless another mod for the same confidently
+  identified character is already installed: that new folder gets the ZZMI
+  `DISABLED_` prefix so two outfits for a character are never active at once.
+  The rule covers both entry points (dropped archive and GameBanana download),
+  never touches pre-existing mods, and errs on the side of enabling when the
+  character is **Uncategorized** or only guessed from a `[Tag]` prefix that is
+  not a known ZZZ roster name.
 - Folder names are sanitized for Windows (invalid characters, reserved names,
   leading dots) and collisions get a ` (2)`, ` (3)` suffix instead of
   overwriting an existing mod.

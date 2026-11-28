@@ -133,7 +133,51 @@ pub fn guess_with_context(
     // Roster matching runs before the bracket prefix because tags such as
     // `[NSFW] Ellen Joe` or `[4K] Zhu Yuan` would otherwise be mistaken for a
     // character name and hide the real one.
+    if let Some((character, _)) = best_roster_match(base_name, display_name, hints) {
+        return character.to_string();
+    }
+
+    from_bracket_prefix(base_name)
+        .or_else(|| from_bracket_prefix(display_name))
+        .unwrap_or_else(|| "Uncategorized".to_string())
+}
+
+/// The character the app is *sure* about, for deciding whether a freshly
+/// installed mod collides with one that is already there. Unlike
+/// [`guess_with_context`], the result is only ever a known ZZZ roster name
+/// found in the sidecar metadata, the folder name, the display name, or an INI
+/// hint.
+///
+/// Free-form tags (`[4K]`, `[NSFW]`) and custom user labels are deliberately
+/// not "sure": treating them as characters would disable new mods for no
+/// reason, so an unidentified or ambiguous mod reports `None`.
+pub fn confident_character(
+    metadata: Option<&ModMetadata>,
+    base_name: &str,
+    display_name: &str,
+    hints: &[String],
+) -> Option<&'static str> {
+    if let Some(name) = metadata.and_then(|meta| meta.character.as_deref()) {
+        let name = name.trim();
+        if !name.is_empty() && !is_generic(name) {
+            if let Some((character, _)) = roster_match(name) {
+                return Some(character);
+            }
+        }
+    }
+
+    best_roster_match(base_name, display_name, hints).map(|(character, _)| character)
+}
+
+/// Longest roster alias found across the folder name, the display name and the
+/// INI hints. `AnbyS0` must resolve to Soldier 0 Anby, not Anby Demara.
+fn best_roster_match(
+    base_name: &str,
+    display_name: &str,
+    hints: &[String],
+) -> Option<(&'static str, usize)> {
     let mut best: Option<(&'static str, usize)> = None;
+
     for hint in std::iter::once(base_name)
         .chain(std::iter::once(display_name))
         .chain(hints.iter().map(String::as_str))
@@ -145,13 +189,7 @@ pub fn guess_with_context(
         }
     }
 
-    if let Some((character, _)) = best {
-        return character.to_string();
-    }
-
-    from_bracket_prefix(base_name)
-        .or_else(|| from_bracket_prefix(display_name))
-        .unwrap_or_else(|| "Uncategorized".to_string())
+    best
 }
 
 fn from_bracket_prefix(name: &str) -> Option<String> {
@@ -404,5 +442,50 @@ mod tests {
     fn falls_back_to_uncategorized() {
         assert_eq!(guess(None, "Some Random Outfit"), "Uncategorized");
         assert_eq!(guess(None, "JiggleForgeShaderFix"), "Uncategorized");
+    }
+
+    #[test]
+    fn confident_character_requires_a_known_roster_name() {
+        assert_eq!(
+            confident_character(None, "EllenMod_merge", "EllenMod_merge", &[]),
+            Some("Ellen Joe")
+        );
+        assert_eq!(
+            confident_character(None, "Outfit 01", "Outfit 01", &["Dialyn.ini".to_string()]),
+            Some("Dialyn")
+        );
+        // A `[Tag]` prefix that is not a known character is ambiguous, so it must
+        // not look like a collision.
+        assert_eq!(
+            confident_character(None, "[4K] Something", "[4K] Something", &[]),
+            None
+        );
+        assert_eq!(
+            confident_character(None, "Some Random Outfit", "Some Random Outfit", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn confident_character_only_trusts_a_roster_name_from_metadata() {
+        let known = ModMetadata {
+            character: Some("Ellen".into()),
+            ..ModMetadata::default()
+        };
+        assert_eq!(
+            confident_character(Some(&known), "Outfit 01", "Outfit 01", &[]),
+            Some("Ellen Joe")
+        );
+
+        // A custom user label is not a ZZZ character, so two mods carrying it
+        // must not disable each other.
+        let custom = ModMetadata {
+            character: Some("My Custom Label".into()),
+            ..ModMetadata::default()
+        };
+        assert_eq!(
+            confident_character(Some(&custom), "Outfit 01", "Outfit 01", &[]),
+            None
+        );
     }
 }

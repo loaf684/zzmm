@@ -339,6 +339,7 @@ async fn install_download(
             &mods_dir_owned,
             &archive_owned,
             &detail_for_progress.name,
+            detail_for_progress.sub_category.as_deref(),
             cancel.as_ref(),
             &mut emit_install,
         );
@@ -479,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn replacing_an_enabled_mod_disables_it_beside_the_new_disabled_folder() {
+    fn replacing_an_enabled_mod_disables_it_beside_the_new_copy() {
         let root = std::env::temp_dir().join(format!("zzmm-replace-test-{}", std::process::id()));
         let mods_dir = root.join("Mods");
         fs::create_dir_all(&mods_dir).expect("mods dir");
@@ -505,20 +506,21 @@ mod tests {
             &mods_dir,
             &archive_path,
             "My Skin",
+            None,
             &AtomicBool::new(false),
             &mut |_| {},
         );
         assert_eq!(outcome.error, None);
 
-        // The update yields `DISABLED_My Skin` to the version it replaces, so the
-        // new folder lands disabled *and* the old one can still be disabled.
-        assert_eq!(outcome.installed, vec!["DISABLED_My Skin (2)".to_string()]);
+        // "My Skin" names no character, so the copy lands enabled beside the old
+        // name; the replaced version is the one disabled afterwards.
+        assert_eq!(outcome.installed, vec!["My Skin (2)".to_string()]);
 
         let replaced = disable_replaced(&mods_dir, &outcome.installed, Some("My Skin"));
         assert_eq!(replaced, Some("My Skin".to_string()));
 
+        assert!(mods_dir.join("My Skin (2)/mod.ini").is_file());
         assert!(mods_dir.join("DISABLED_My Skin/mod.ini").is_file());
-        assert!(mods_dir.join("DISABLED_My Skin (2)/mod.ini").is_file());
         assert!(!mods_dir.join("My Skin").exists());
 
         fs::remove_dir_all(&root).ok();
