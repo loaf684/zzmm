@@ -147,6 +147,11 @@ export function BrowseHero({
           <p className="flex items-center gap-2 font-display text-[10px] font-medium uppercase tracking-[0.24em] text-acid-300">
             <Sparkles className="h-3.5 w-3.5" aria-hidden />
             Featured
+            {mod.nsfw === "nsfw" ? (
+              <span className="rounded border border-hot-500/40 bg-hot-500/20 px-1.5 py-0.5 text-[9px] tracking-[0.16em] text-hot-300">
+                NSFW
+              </span>
+            ) : null}
           </p>
 
           <h2

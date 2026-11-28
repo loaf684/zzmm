@@ -21,7 +21,7 @@ import { useDownloadStore } from "@/store/download";
 import { useInstallerStore } from "@/store/installer";
 import { useModsStore } from "@/store/mods";
 import { useUpdatesStore } from "@/store/updates";
-import type { BrowseSort } from "@/types/gamebanana";
+import type { BrowseSort, NsfwFilter } from "@/types/gamebanana";
 import { BrowseCard, BrowseCardSkeleton } from "./BrowseCard";
 import { BrowseHero, BrowseHeroSkeleton } from "./BrowseHero";
 import type { BrowseStats } from "./BrowseHero";
@@ -52,6 +52,14 @@ const SORT_GROUPS: { label: string; options: { value: BrowseSort; label: string 
       { value: "name-desc", label: "Name Z–A" },
     ],
   },
+];
+
+/** Content filter. The three labels are deliberately distinct: All keeps every
+ *  mod, including ones GameBanana did not classify. */
+const NSFW_OPTIONS: { value: NsfwFilter; label: string }[] = [
+  { value: "all", label: "All content" },
+  { value: "sfw", label: "SFW only" },
+  { value: "nsfw", label: "NSFW only" },
 ];
 
 /** Suggestions for the character field. GameBanana's subcategory names are
@@ -120,6 +128,7 @@ export function BrowsePage() {
   const setView = useBrowseStore((state) => state.setView);
   const setCategory = useBrowseStore((state) => state.setCategory);
   const setCharacter = useBrowseStore((state) => state.setCharacter);
+  const setNsfw = useBrowseStore((state) => state.setNsfw);
   const refresh = useBrowseStore((state) => state.refresh);
   const loadMore = useBrowseStore((state) => state.loadMore);
   const loadCategories = useBrowseStore((state) => state.loadCategories);
@@ -433,6 +442,26 @@ export function BrowsePage() {
           className="w-[164px]"
         />
 
+        <div className="relative">
+          <select
+            value={filters.nsfw}
+            onChange={(event) => setNsfw(event.target.value as NsfwFilter)}
+            aria-label="Content filter"
+            title="Filter by GameBanana's mature-content setting"
+            className="h-10 w-[140px] appearance-none border border-ink-600 bg-ink-900/70 pl-3 pr-8 font-display text-[10px] uppercase tracking-[0.16em] text-zinc-300 focus:border-acid-400/60 focus:outline-none"
+          >
+            {NSFW_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500"
+            aria-hidden
+          />
+        </div>
+
         {activeFilters ? (
           <Button
             variant="ghost"
@@ -490,7 +519,8 @@ export function BrowsePage() {
             <Compass className="h-8 w-8 text-zinc-700" aria-hidden />
             <p className="max-w-md text-xs leading-relaxed text-zinc-500">
               No mods matched this search and filter combination. Try a shorter
-              search term, another character, or clear the category filter.
+              search term, another character, widen the content filter, or
+              clear the category filter.
             </p>
             <Button
               onClick={() => {

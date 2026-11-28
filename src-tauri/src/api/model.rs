@@ -8,6 +8,48 @@ use serde::{Deserialize, Serialize};
 // the UI actually needs are mapped.
 // ---------------------------------------------------------------------------
 
+/// How GameBanana gates a submission behind its mature-content warning.
+///
+/// The apiv11 mod payloads carry no `_bIsNsfw`; the signal is
+/// `_sInitialVisibility` (`show` / `warn` / `hide`), corroborated by
+/// `_bHasContentRatings` on list endpoints and `_aContentRatings` on the
+/// profile page. `show` with no ratings is the only thing this app treats as
+/// safe: a payload with neither field is [`NsfwLevel::Unknown`], never safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NsfwLevel {
+    Safe,
+    Nsfw,
+    Unknown,
+}
+
+/// Classify a submission from its visibility string and whether it carries
+/// content ratings. `visibility` is trimmed and matched case-insensitively so a
+/// stray casing or padding cannot silently downgrade an explicit submission.
+pub fn nsfw_level(visibility: Option<&str>, rated: bool) -> NsfwLevel {
+    let visibility = visibility.map(str::trim).filter(|value| !value.is_empty());
+
+    match visibility.map(str::to_ascii_lowercase).as_deref() {
+        // Rated content is adult even when the submitter left it visible.
+        Some("show") => {
+            if rated {
+                NsfwLevel::Nsfw
+            } else {
+                NsfwLevel::Safe
+            }
+        }
+        Some("warn") | Some("hide") => NsfwLevel::Nsfw,
+        // An unrecognised visibility value is no evidence of safety.
+        _ => {
+            if rated {
+                NsfwLevel::Nsfw
+            } else {
+                NsfwLevel::Unknown
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawPage {
     #[serde(rename = "_aMetadata", default)]
@@ -46,6 +88,13 @@ pub struct RawRecord {
     pub view_count: Option<u32>,
     #[serde(rename = "_bHasFiles", default)]
     pub has_files: Option<bool>,
+    /// `show` / `warn` / `hide`: GameBanana's mature-content gate.
+    #[serde(rename = "_sInitialVisibility", default)]
+    pub initial_visibility: Option<String>,
+    /// Content ratings exist on this submission (the codes themselves are only
+    /// on the profile page).
+    #[serde(rename = "_bHasContentRatings", default)]
+    pub has_content_ratings: Option<bool>,
     #[serde(rename = "_aPreviewMedia", default)]
     pub preview_media: Option<RawPreviewMedia>,
     #[serde(rename = "_aSubmitter", default)]
@@ -54,6 +103,15 @@ pub struct RawRecord {
     pub root_category: Option<RawCategory>,
     #[serde(rename = "_aSubCategory", default)]
     pub sub_category: Option<RawCategory>,
+}
+
+impl RawRecord {
+    pub fn nsfw_level(&self) -> NsfwLevel {
+        nsfw_level(
+            self.initial_visibility.as_deref(),
+            self.has_content_ratings.unwrap_or(false),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -209,6 +267,13 @@ pub struct RawDetail {
     pub sub_category: Option<RawCategory>,
     #[serde(rename = "_bIsObsolete", default)]
     pub is_obsolete: Option<bool>,
+    /// `show` / `warn` / `hide`: GameBanana's mature-content gate.
+    #[serde(rename = "_sInitialVisibility", default)]
+    pub initial_visibility: Option<String>,
+    /// Rating codes to titles (`{"sa": "Skimpy Attire", ...}`); empty or absent
+    /// on submissions GameBanana does not rate.
+    #[serde(rename = "_aContentRatings", default)]
+    pub content_ratings: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -246,6 +311,8 @@ pub struct BrowseParams {
     /// `newest` | `trending` | `updated` | `oldest` | `likes` | `views` |
     /// `downloads` | `name` | `name-desc`.
     pub sort: Option<String>,
+    /// `all` | `sfw` | `nsfw`; absent means `all`.
+    pub nsfw: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +331,8 @@ pub struct ModSummary {
     pub thumbnail_url: Option<String>,
     pub profile_url: String,
     pub has_files: bool,
+    /// Mature-content classification; `unknown` is never treated as safe.
+    pub nsfw: NsfwLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +382,8 @@ pub struct ModDetail {
     pub obsolete: bool,
     #[serde(default)]
     pub cached: bool,
+    /// Mature-content classification; `unknown` is never treated as safe.
+    pub nsfw: NsfwLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,6 +482,7 @@ pub fn summarize(record: &RawRecord) -> ModSummary {
             .clone()
             .unwrap_or_else(|| format!("https://gamebanana.com/mods/{}", record.id)),
         has_files: record.has_files.unwrap_or(false),
+        nsfw: record.nsfw_level(),
     }
 }
 
@@ -474,5 +546,52 @@ pub fn to_detail(raw: RawDetail) -> ModDetail {
         files,
         obsolete: raw.is_obsolete.unwrap_or(false),
         cached: false,
+        nsfw: nsfw_level(
+            raw.initial_visibility.as_deref(),
+            raw.content_ratings
+                .as_ref()
+                .map(|ratings| !ratings.is_empty())
+                .unwrap_or(false),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_visibility_and_ratings() {
+        // `show` without ratings is the only signal this app calls safe.
+        assert_eq!(nsfw_level(Some("show"), false), NsfwLevel::Safe);
+        assert_eq!(nsfw_level(Some(" SHOW "), false), NsfwLevel::Safe);
+        assert_eq!(nsfw_level(Some("warn"), false), NsfwLevel::Nsfw);
+        assert_eq!(nsfw_level(Some("hide"), false), NsfwLevel::Nsfw);
+        // Ratings make a nominally visible submission adult.
+        assert_eq!(nsfw_level(Some("show"), true), NsfwLevel::Nsfw);
+        // "Missing" must never decode as safe.
+        assert_eq!(nsfw_level(None, false), NsfwLevel::Unknown);
+        assert_eq!(nsfw_level(Some(""), false), NsfwLevel::Unknown);
+        assert_eq!(nsfw_level(Some("mystery"), false), NsfwLevel::Unknown);
+        // Ratings alone are still adult.
+        assert_eq!(nsfw_level(None, true), NsfwLevel::Nsfw);
+    }
+
+    #[test]
+    fn record_level_reads_the_wire_fields() {
+        let safe = RawRecord {
+            initial_visibility: Some("show".into()),
+            has_content_ratings: Some(false),
+            ..RawRecord::default()
+        };
+        let adult = RawRecord {
+            initial_visibility: Some("hide".into()),
+            has_content_ratings: Some(true),
+            ..RawRecord::default()
+        };
+
+        assert_eq!(safe.nsfw_level(), NsfwLevel::Safe);
+        assert_eq!(adult.nsfw_level(), NsfwLevel::Nsfw);
+        assert_eq!(RawRecord::default().nsfw_level(), NsfwLevel::Unknown);
     }
 }

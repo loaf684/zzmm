@@ -13,6 +13,17 @@ export type BrowseSort =
   | "name"
   | "name-desc";
 
+/** Mature-content classification, derived server-side from GameBanana's
+ *  `_sInitialVisibility` (`show` / `warn` / `hide`) and content ratings.
+ *  `unknown` means the payload carried neither signal and is never treated as
+ *  safe. */
+export type NsfwLevel = "safe" | "nsfw" | "unknown";
+
+/** Content filter. The three modes partition the catalogue: `all` keeps every
+ *  mod (including unclassified ones), `sfw` only safe mods and `nsfw` only
+ *  adult ones. */
+export type NsfwFilter = "all" | "sfw" | "nsfw";
+
 export interface BrowseParams {
   cursor?: number | null;
   search?: string | null;
@@ -21,6 +32,7 @@ export interface BrowseParams {
   /** Matched against GameBanana's subcategory name (e.g. "Ellen Joe"). */
   character?: string | null;
   sort?: BrowseSort;
+  nsfw?: NsfwFilter | null;
 }
 
 export interface ModSummary {
@@ -38,6 +50,7 @@ export interface ModSummary {
   thumbnailUrl: string | null;
   profileUrl: string;
   hasFiles: boolean;
+  nsfw: NsfwLevel;
 }
 
 export interface BrowsePage {
@@ -80,6 +93,7 @@ export interface ModDetail {
   files: ModFile[];
   obsolete: boolean;
   cached: boolean;
+  nsfw: NsfwLevel;
 }
 
 export interface CategoryChip {

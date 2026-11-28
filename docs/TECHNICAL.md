@@ -252,8 +252,17 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 
 - **Browse** (`/browse`) lists Zenless Zone Zero mods (game ID `19567`) with a
   card grid: thumbnail, name, author, likes and version.
-- Search, category filter (GameBanana root categories), character filter and
-  sorting, with infinite scroll and a manual *Load more* fallback.
+- Search, category filter (GameBanana root categories), character filter,
+  content filter and sorting, with infinite scroll and a manual *Load more*
+  fallback.
+- **Content filter** (`All` / `SFW` / `NSFW`) reads GameBanana's mature-content
+  metadata: `_sInitialVisibility` (`show` / `warn` / `hide`), corroborated by
+  `_bHasContentRatings` on the list endpoints and `_aContentRatings` on the
+  profile page. `show` with no ratings is the only thing treated as safe; a
+  payload carrying neither field is *unknown* and appears only under **All**.
+  The three modes partition the catalogue, the choice persists in
+  `localStorage`, and it applies to the storefront hero and shelves as well as
+  the result feed. The default is **SFW**.
 - **Detail page** (`/browse/:modId`): gallery with thumbnails, stats, file list
   with sizes/dates/versions, and an install button.
 - **Install** downloads the chosen file into the app data `downloads` folder
@@ -282,6 +291,9 @@ are flagged **Unlinked**. Unknown or missing fields are tolerated.
 - **Character filter** matches GameBanana's subcategory name (e.g. "Ellen Joe")
   by substring. There is no working apiv11 endpoint for the subcategory tree, so
   the field offers roster suggestions but accepts any text.
+- **Content filter** has no server-side equivalent either: no apiv11 endpoint
+  can filter by visibility, so it is applied while walking pages (bounded by the
+  same lookahead cap) and the browse cache key includes the selected mode.
 - **Descriptions** are HTML fragments in GameBanana's `_sText` field (with
   `<br>`, `<b>`, `<font>`, `&nbsp;`, and occasional BBCode). ZZMM parses them
   into readable plain text — preserving paragraph and line breaks, list bullets
